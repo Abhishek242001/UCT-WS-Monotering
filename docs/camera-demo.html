@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Animated Camera Element — Color &amp; Motion Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --navy: #0F2138;
+    --navy-deep: #081426;
+    --blue: #2D6CDF;
+    --cyan: #3FD2FF;
+    --amber: #F5A623;
+    --white: #FFFFFF;
+    --slate: #7C8CA6;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0;
+    background: var(--navy-deep);
+    background-image:
+      linear-gradient(var(--navy-deep), var(--navy-deep)),
+      repeating-linear-gradient(0deg, rgba(63,210,255,0.035) 0px, rgba(63,210,255,0.035) 1px, transparent 1px, transparent 48px),
+      repeating-linear-gradient(90deg, rgba(63,210,255,0.035) 0px, rgba(63,210,255,0.035) 1px, transparent 1px, transparent 48px);
+    font-family: 'Inter', sans-serif;
+    color: var(--white);
+    min-height: 100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding: 48px 24px 72px;
+  }
+
+  .palette{
+    display:flex;
+    gap:14px;
+    margin-bottom: 56px;
+  }
+  .swatch{
+    width: 84px;
+    text-align:center;
+  }
+  .swatch .chip{
+    width: 84px;
+    height: 56px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .swatch .label{
+    font-size: 11px;
+    color: var(--slate);
+    margin-top: 8px;
+    letter-spacing: 0.02em;
+  }
+  .swatch .hex{
+    font-size: 11px;
+    color: rgba(255,255,255,0.55);
+    font-variant-numeric: tabular-nums;
+  }
+
+  h1{
+    font-family:'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: clamp(28px, 4vw, 40px);
+    margin: 0 0 8px;
+    text-align:center;
+    letter-spacing: -0.01em;
+  }
+  p.sub{
+    color: var(--slate);
+    max-width: 480px;
+    text-align:center;
+    line-height:1.6;
+    margin: 0 0 48px;
+    font-size:15px;
+  }
+
+  .scene-wrap{
+    position:relative;
+    width: 320px;
+    height: 340px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+  }
+
+  .glow{
+    position:absolute;
+    width: 240px;
+    height: 240px;
+    border-radius:50%;
+    background: radial-gradient(circle, rgba(45,108,223,0.18), transparent 70%);
+    filter: blur(2px);
+  }
+
+  svg{ position:relative; z-index:1; overflow: visible; }
+
+  /* --- camera body --- */
+  .cam-body{ fill: var(--navy); stroke: var(--slate); stroke-width: 1.5; }
+  .lens-outer{ fill: var(--navy-deep); stroke: var(--slate); stroke-width: 1.5; }
+  .lens-inner{ fill: rgba(63,210,255,0.15); }
+
+  .status-dot{
+    fill: var(--cyan);
+    animation: breathe 2.2s ease-in-out infinite;
+    transform-origin: center;
+  }
+  @keyframes breathe{
+    0%, 100% { opacity: 0.45; transform: scale(0.85); }
+    50%      { opacity: 1;    transform: scale(1.15); }
+  }
+
+  /* --- lens scan line, continuous, independent of the detection cycle --- */
+  .scan-clip{ }
+  .scan-line{
+    animation: scan 2.6s linear infinite;
+  }
+  @keyframes scan{
+    0%   { transform: translateY(-16px); opacity: 0; }
+    15%  { opacity: 0.9; }
+    85%  { opacity: 0.9; }
+    100% { transform: translateY(16px); opacity: 0; }
+  }
+
+  /* --- view cone --- */
+  .cone{
+    stroke: var(--slate);
+    stroke-width: 1;
+    stroke-dasharray: 3 5;
+    fill: none;
+    opacity: 0.35;
+  }
+
+  /* --- desk --- */
+  .desk{
+    fill: rgba(255,255,255,0.02);
+    stroke: var(--slate);
+    stroke-width: 1.5;
+  }
+
+  /* --- presence blob (anonymized, never a face) --- */
+  .presence{
+    fill: url(#presenceGradient);
+    animation: presence-fade 6s ease-in-out infinite;
+  }
+  @keyframes presence-fade{
+    0%, 100% { opacity: 0.55; }
+    20%      { opacity: 0.85; }
+    55%      { opacity: 0.85; }
+    70%      { opacity: 0.55; }
+  }
+
+  /* --- bounding box detection cycle --- */
+  .bbox{
+    fill: none;
+    stroke: var(--cyan);
+    stroke-width: 1.5;
+    stroke-dasharray: 210;
+    animation: detect-cycle 6s ease-in-out infinite;
+  }
+  @keyframes detect-cycle{
+    0%   { stroke-dashoffset: 210; opacity: 0; }
+    10%  { opacity: 1; }
+    28%  { stroke-dashoffset: 0;   opacity: 1; }
+    62%  { stroke-dashoffset: 0;   opacity: 1; }
+    78%  { opacity: 0; stroke-dashoffset: 0; }
+    100% { opacity: 0; stroke-dashoffset: 210; }
+  }
+
+  .match-label{
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 12px;
+    font-weight: 700;
+    fill: var(--cyan);
+    letter-spacing: 0.06em;
+    animation: label-cycle 6s ease-in-out infinite;
+  }
+  @keyframes label-cycle{
+    0%, 26%  { opacity: 0; transform: translateY(4px); }
+    32%      { opacity: 1; transform: translateY(0); }
+    62%      { opacity: 1; transform: translateY(0); }
+    72%, 100%{ opacity: 0; transform: translateY(4px); }
+  }
+
+  .caption{
+    margin-top: 28px;
+    font-size: 13px;
+    color: var(--slate);
+    text-align:center;
+    max-width: 360px;
+    line-height: 1.6;
+  }
+  .caption strong{ color: var(--white); font-weight: 500; }
+</style>
+</head>
+<body>
+
+  <div class="palette">
+    <div class="swatch"><div class="chip" style="background:#0F2138"></div><div class="label">Navy</div><div class="hex">#0F2138</div></div>
+    <div class="swatch"><div class="chip" style="background:#2D6CDF"></div><div class="label">Signal Blue</div><div class="hex">#2D6CDF*</div></div>
+    <div class="swatch"><div class="chip" style="background:#3FD2FF"></div><div class="label">Cyan</div><div class="hex">#3FD2FF</div></div>
+    <div class="swatch"><div class="chip" style="background:#F5A623"></div><div class="label">Amber</div><div class="hex">#F5A623</div></div>
+    <div class="swatch"><div class="chip" style="background:#FFFFFF"></div><div class="label">White</div><div class="hex">#FFFFFF</div></div>
+  </div>
+
+  <h1>Precision, not surveillance.</h1>
+  <p class="sub">The signature animated moment for the site: a calm status pulse, a continuous lens scan, and a detection box that draws itself around an anonymized presence — never a real face.</p>
+
+  <div class="scene-wrap">
+    <div class="glow"></div>
+    <svg width="300" height="320" viewBox="0 0 300 320">
+      <defs>
+        <radialGradient id="presenceGradient" cx="50%" cy="45%" r="60%">
+          <stop offset="0%" stop-color="#3FD2FF" stop-opacity="0.9"/>
+          <stop offset="100%" stop-color="#2D6CDF" stop-opacity="0.05"/>
+        </radialGradient>
+        <clipPath id="lensClip">
+          <circle cx="150" cy="58" r="13"/>
+        </clipPath>
+      </defs>
+
+      <!-- view cone -->
+      <path class="cone" d="M150,78 L88,215 M150,78 L212,215"/>
+
+      <!-- camera body -->
+      <rect class="cam-body" x="108" y="28" width="84" height="34" rx="8"/>
+      <circle class="lens-outer" cx="150" cy="58" r="15"/>
+      <circle class="lens-inner" cx="150" cy="58" r="9"/>
+      <circle class="status-dot" cx="180" cy="34" r="3.5"/>
+
+      <g clip-path="url(#lensClip)">
+        <rect class="scan-line" x="137" y="52" width="26" height="2" fill="#3FD2FF"/>
+      </g>
+
+      <!-- desk -->
+      <rect class="desk" x="70" y="235" width="160" height="26" rx="4"/>
+
+      <!-- anonymized presence -->
+      <circle class="presence" cx="150" cy="207" r="26"/>
+
+      <!-- detection bounding box -->
+      <rect class="bbox" x="115" y="176" width="70" height="62" rx="4"/>
+      <text class="match-label" x="115" y="168">MATCH</text>
+    </svg>
+  </div>
+
+  <p class="caption">
+    <strong>One animated moment, used deliberately</strong> — the scan line signals "live," the breathing dot signals "monitoring," and the drawing box signals "identified" — without ever rendering a recognizable person. Everything else on the page stays quiet by comparison.
+  </p>
+
+</body>
+</html>

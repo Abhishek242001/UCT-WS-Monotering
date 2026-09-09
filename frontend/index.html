@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UCT Workstation Monitor</title>
+<style>
+  :root{
+    --indigo: #2C2AAA;
+    --indigo-light: #5D5FEF;
+    --navy-deep: #0F0E33;
+    --amber: #F5A623;
+    --green: #2FB380;
+    --white: #FFFFFF;
+    --slate: #6B6E96;
+    --bg: #F5F5FA;
+    --card: #FFFFFF;
+    --border: #E3E3EF;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; font-family: -apple-system, 'Inter', 'Segoe UI', sans-serif;
+    background: var(--bg); color:#1B1B33;
+  }
+  header{
+    background: linear-gradient(120deg, var(--navy-deep), var(--indigo));
+    color:white; padding:16px 28px; display:flex; align-items:center; gap:14px;
+  }
+  header img{ height:34px; background:white; border-radius:6px; padding:3px; }
+  header h1{ font-size:17px; margin:0; font-weight:600; letter-spacing:0.01em; }
+  header .status{ margin-left:auto; font-size:12px; color:#CFCFFA; }
+
+  nav{ display:flex; gap:2px; background:var(--navy-deep); padding:0 24px; }
+  nav button{
+    background:none; border:none; color:#B9B9E6; padding:14px 18px; font-size:13.5px;
+    cursor:pointer; border-bottom:2px solid transparent; font-weight:500;
+  }
+  nav button.active{ color:white; border-bottom-color: var(--amber); }
+  nav button:hover{ color:white; }
+
+  main{ max-width:1100px; margin:28px auto; padding:0 20px; }
+  .card{
+    background:var(--card); border:1px solid var(--border); border-radius:10px;
+    padding:22px; margin-bottom:20px;
+  }
+  .card h2{ margin:0 0 14px; font-size:16px; color:var(--navy-deep); }
+  .row{ display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div{ flex:1; min-width:160px; }
+  label{ display:block; font-size:12px; color:var(--slate); margin-bottom:4px; font-weight:500; }
+  input, select{
+    width:100%; padding:9px 10px; border:1px solid var(--border); border-radius:6px;
+    font-size:13.5px; background:#FAFAFF;
+  }
+  button.primary{
+    background:var(--indigo); color:white; border:none; padding:10px 18px;
+    border-radius:6px; font-size:13.5px; font-weight:600; cursor:pointer; margin-top:10px;
+  }
+  button.primary:hover{ background:var(--indigo-light); }
+  button.secondary{
+    background:white; color:var(--indigo); border:1px solid var(--indigo);
+    padding:8px 14px; border-radius:6px; font-size:12.5px; cursor:pointer;
+  }
+  table{ width:100%; border-collapse:collapse; font-size:13px; }
+  th{ text-align:left; color:var(--slate); font-weight:600; font-size:11.5px; text-transform:uppercase;
+      letter-spacing:0.03em; border-bottom:1px solid var(--border); padding:8px 6px; }
+  td{ padding:9px 6px; border-bottom:1px solid #F0F0F7; }
+  .badge{ padding:3px 9px; border-radius:20px; font-size:11px; font-weight:700; letter-spacing:0.02em; }
+  .badge.MATCH{ background:#E5F7EE; color:var(--green); }
+  .badge.MISMATCH{ background:#FFF3E0; color:var(--amber); }
+  .badge.UNKNOWN{ background:#F0F0F7; color:var(--slate); }
+  .badge.VACANT{ background:#F0F0F7; color:var(--slate); }
+  .badge.PRESENT{ background:#E5F7EE; color:var(--green); }
+  .badge.SIGNED_OUT{ background:#F0F0F7; color:var(--slate); }
+  .hint{ font-size:12px; color:var(--slate); margin-top:6px; line-height:1.5; }
+  .msg{ padding:10px 14px; border-radius:6px; font-size:13px; margin-bottom:14px; }
+  .msg.ok{ background:#E5F7EE; color:#1D8F5E; }
+  .msg.err{ background:#FDEDED; color:#C0392B; }
+  #roiCanvas{ border:1px dashed var(--border); border-radius:8px; max-width:100%; cursor:crosshair; }
+  .progress-outer{ background:#EEEEF6; border-radius:20px; height:18px; overflow:hidden; margin:10px 0; }
+  .progress-inner{ background:linear-gradient(90deg, var(--indigo), var(--indigo-light)); height:100%; width:0%;
+                    transition:width 0.2s ease; display:flex; align-items:center; justify-content:flex-end; }
+  .progress-inner span{ color:white; font-size:10px; padding-right:8px; font-weight:700; }
+  .event-log{ max-height:280px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; padding:8px; background:#FAFAFF; }
+  .event-log .line{ font-size:12.5px; padding:4px 6px; border-bottom:1px solid #F0F0F7; display:flex; justify-content:space-between; gap:8px; }
+  .event-log .line:last-child{ border-bottom:none; }
+  .login-wrap{ display:flex; align-items:center; justify-content:center; height:80vh; }
+  .login-card{ width:340px; text-align:center; }
+  .login-card img{ height:52px; margin-bottom:16px; }
+  #app{ display:none; }
+</style>
+</head>
+<body>
+
+<div id="loginScreen" class="login-wrap">
+  <div class="card login-card">
+    <img src="logo.png" alt="UCT" onerror="this.style.display='none'">
+    <h2>Sign in to UCT Workstation Monitor</h2>
+    <div id="loginMsg"></div>
+    <div style="text-align:left">
+      <label>Username</label>
+      <input id="loginUsername" value="hr_admin1">
+      <label style="margin-top:10px">Password</label>
+      <input id="loginPassword" type="password" placeholder="see server console on first run">
+    </div>
+    <button class="primary" style="width:100%" onclick="doLogin()">Sign in</button>
+    <p class="hint">Default credentials are printed to the backend's console the first time it starts. Change them via DEFAULT_ADMIN_USERNAME / DEFAULT_ADMIN_PASSWORD in your .env.</p>
+  </div>
+</div>
+
+<div id="app">
+  <header>
+    <img src="logo.png" alt="UCT" onerror="this.style.display='none'">
+    <h1>UCT Workstation Monitor</h1>
+    <div style="margin-left:24px; display:flex; align-items:center; gap:6px;">
+      <label style="color:#CFCFFA; margin:0; font-size:12px">Org ID</label>
+      <input id="globalOrgId" value="1" style="width:60px; padding:5px 8px;" onchange="loadIdentityStatus(); loadWorkstations(); loadEmployees();">
+    </div>
+    <div class="status" style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">
+      <span id="whoAmI"></span>
+      <span id="backendStatus">connecting…</span>
+    </div>
+    <button class="secondary" style="margin-left:14px" onclick="logout()">Sign out</button>
+  </header>
+  <nav>
+    <button class="active" onclick="showTab('dashboard')">Dashboard</button>
+    <button onclick="showTab('workstations')">Workstations</button>
+    <button onclick="showTab('employees')">Employees</button>
+    <button onclick="showTab('detect')">Try Detection</button>
+    <button onclick="showTab('livestream')">Live Stream</button>
+    <button onclick="showTab('videoanalysis')">Video Analysis</button>
+    <button onclick="showTab('attendance')">Attendance</button>
+  </nav>
+
+  <main>
+    <!-- DASHBOARD -->
+    <section id="tab-dashboard">
+      <div class="card">
+        <h2>Live identity status</h2>
+        <div class="row" style="max-width:200px; margin-bottom:10px">
+          <div><label>Camera ID</label><input id="dashCamId" value="101" onchange="loadIdentityStatus()"></div>
+        </div>
+        <div id="statusMsg"></div>
+        <table>
+          <thead><tr><th>Workstation</th><th>Occupancy</th><th>Assigned</th><th>Detected</th><th>Status</th><th>Similarity</th></tr></thead>
+          <tbody id="statusTable"></tbody>
+        </table>
+        <button class="secondary" onclick="loadIdentityStatus()">Refresh</button>
+      </div>
+    </section>
+
+    <!-- WORKSTATIONS -->
+    <section id="tab-workstations" style="display:none">
+      <div class="card">
+        <h2>Draw a workstation ROI</h2>
+        <p class="hint">Upload a snapshot from the camera, then click-drag a rectangle over the desk. Coordinates are saved normalized (0.0–1.0) so the same ROI works regardless of camera resolution.</p>
+        <input type="file" id="roiImageInput" accept="image/*" onchange="loadRoiImage(event)">
+        <br><br>
+        <canvas id="roiCanvas" width="640" height="400"></canvas>
+        <div class="row" style="margin-top:12px">
+          <div><label>Camera ID</label><input id="roiCamId" value="101"></div>
+          <div><label>Workstation name</label><input id="roiName" placeholder="Desk-A"></div>
+        </div>
+        <div id="roiCoordsPreview" class="hint"></div>
+        <button class="primary" onclick="saveWorkstation()">Save workstation</button>
+        <div id="roiMsg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Saved workstations</h2>
+        <table>
+          <thead><tr><th>Name</th><th>ROI (x1,y1,x2,y2)</th></tr></thead>
+          <tbody id="workstationsTable"></tbody>
+        </table>
+        <button class="secondary" onclick="loadWorkstations()">Refresh</button>
+      </div>
+
+      <div class="card">
+        <h2>Assign an employee to a workstation</h2>
+        <div class="row">
+          <div><label>Workstation name</label><input id="assignWsName" placeholder="Desk-A"></div>
+          <div><label>Employee ID</label><input id="assignEmpId" placeholder="EMP-1001"></div>
+        </div>
+        <button class="primary" onclick="assignEmployee()">Assign</button>
+        <div id="assignMsg"></div>
+      </div>
+    </section>
+
+    <!-- EMPLOYEES -->
+    <section id="tab-employees" style="display:none">
+      <div class="card">
+        <h2>Enroll an employee</h2>
+        <p class="hint">Submit once per view (front / left / right / top) — four calls builds the full gallery entry for one employee, per the dataset structure documented in Section 5.2 of the project documentation.</p>
+        <div class="row">
+          <div><label>Employee ID</label><input id="enrollId" placeholder="EMP-1001"></div>
+          <div><label>Name</label><input id="enrollName" placeholder="Jane Doe"></div>
+          <div><label>View</label>
+            <select id="enrollView"><option>front</option><option>left</option><option>right</option><option>top</option></select>
+          </div>
+        </div>
+        <label style="margin-top:10px">Photo</label>
+        <input type="file" id="enrollPhoto" accept="image/*">
+        <button class="primary" onclick="enrollEmployee()">Enroll this view</button>
+        <div id="enrollMsg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Enrolled employees</h2>
+        <table>
+          <thead><tr><th>Employee ID</th><th>Name</th><th>Active</th></tr></thead>
+          <tbody id="employeesTable"></tbody>
+        </table>
+        <button class="secondary" onclick="loadEmployees()">Refresh</button>
+      </div>
+    </section>
+
+    <!-- TRY DETECTION -->
+    <section id="tab-detect" style="display:none">
+      <div class="card">
+        <h2>Try it: run real detection on a photo</h2>
+        <p class="hint">Uploads a still image and runs the real YOLO person-detector against your saved ROI, then attempts face matching against enrolled employees. This simulates what a live camera frame would trigger — see backend/app/routers/workstations.py for exactly what runs.</p>
+        <div class="row">
+          <div><label>Camera ID</label><input id="detCamId" value="101"></div>
+          <div><label>Workstation name</label><input id="detWsName" placeholder="Desk-A"></div>
+        </div>
+        <label style="margin-top:10px">Frame / photo</label>
+        <input type="file" id="detFrame" accept="image/*">
+        <button class="primary" onclick="runDetection()">Run detection</button>
+        <div id="detResult"></div>
+      </div>
+    </section>
+
+    <!-- LIVE STREAM -->
+    <section id="tab-livestream" style="display:none">
+      <div class="card">
+        <h2>Start a real stream-processing worker</h2>
+        <p class="hint">Points the real backend at an RTSP URL or a video file path <b>on the server</b> (not a browser upload). It opens the source, runs YOLO occupancy detection on every frame, and identifies people using the event-driven trigger — only on a VACANT→ACTIVE transition or the heartbeat, never every frame. Try <code>../sample_data/demo-camera-feed.mp4</code> to see it work end to end without a real camera.</p>
+        <div class="row">
+          <div><label>Source (RTSP URL or server-side file path)</label><input id="streamSource" value="../sample_data/demo-camera-feed.mp4"></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label>Camera ID</label><input id="streamCamId" value="101"></div>
+          <div><label>Max frames (blank = unlimited)</label><input id="streamMaxFrames" placeholder="e.g. 20"></div>
+        </div>
+        <button class="primary" onclick="startStream()">Start stream</button>
+        <div id="streamMsg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Active streams</h2>
+        <table>
+          <thead><tr><th>Stream ID</th><th>Source</th><th>Alive</th><th>Frames processed</th><th>Opened OK</th><th></th></tr></thead>
+          <tbody id="streamsTable"></tbody>
+        </table>
+        <button class="secondary" onclick="loadStreams()">Refresh</button>
+      </div>
+    </section>
+
+    <!-- VIDEO ANALYSIS -->
+    <section id="tab-videoanalysis" style="display:none">
+      <div class="card">
+        <h2>Upload a video for AI analysis</h2>
+        <p class="hint">Upload a recorded video — this runs through the exact same real-time detection pipeline as a live RTSP camera (see <code>backend/app/routers/streams.py:start_worker</code>, called identically by both). Great for showing a prospect what the system does before they've installed a single camera.</p>
+        <input type="file" id="videoFileInput" accept="video/*" onchange="onVideoFileSelected(event)">
+        <div id="hashCheckMsg" class="hint"></div>
+
+        <div class="card" id="duplicateFoundCard" style="display:none; background:#FFF9EC; border-color:#F5D98E; margin-top:12px">
+          <b>This exact video is already uploaded</b>
+          <p class="hint" style="margin-top:4px">Matched by file content, not just filename — re-uploading it would waste bandwidth and storage for no benefit.</p>
+          <p id="duplicateFoundDetails" style="margin:8px 0; font-size:13px"></p>
+          <button class="primary" onclick="useExistingVideo()">Select this video</button>
+          <button class="secondary" onclick="dismissDuplicateAndUploadAnyway()">Upload as new anyway</button>
+        </div>
+
+        <div class="progress-outer" id="uploadProgressWrap" style="display:none">
+          <div class="progress-inner" id="uploadProgressBar"><span id="uploadProgressLabel">0%</span></div>
+        </div>
+        <div id="uploadMsg"></div>
+
+        <div id="analysisDefaults" style="display:none; margin-top:14px">
+          <p class="hint">Optional — override the defaults below, or leave them and a demo workstation covering the whole frame is created automatically.</p>
+          <div class="row">
+            <div><label>Org ID (optional)</label><input id="vaOrgId" placeholder="default: 1"></div>
+            <div><label>Camera ID (optional)</label><input id="vaCamId" placeholder="auto-assigned per video"></div>
+            <div><label>User ID (optional)</label><input id="vaUserId" placeholder="default: 1"></div>
+          </div>
+          <button class="primary" id="runAnalysisBtn" onclick="runAiAnalysis()" style="display:none">Run AI Analysis</button>
+        </div>
+      </div>
+
+      <div class="card" id="analysisResultsCard" style="display:none">
+        <h2>Live analysis results</h2>
+        <div id="analysisStatusMsg" class="hint"></div>
+        <div class="progress-outer" id="analysisProgressWrap">
+          <div class="progress-inner" id="analysisProgressBar"><span id="analysisProgressLabel">0%</span></div>
+        </div>
+        <div class="event-log" id="analysisEventLog"></div>
+      </div>
+    </section>
+
+    <!-- ATTENDANCE -->
+    <section id="tab-attendance" style="display:none">
+      <div class="card">
+        <h2>Record a presence detection (demo)</h2>
+        <p class="hint">In production this is called automatically by the stream-processing worker whenever an employee is identity-confirmed on any camera. Exposed here so sign-in/out can be tried without a live pipeline.</p>
+        <div class="row">
+          <div><label>Employee ID</label><input id="attEmpId" placeholder="EMP-1001"></div>
+          <div><label>Location label</label><input id="attLocation" placeholder="Desk-A"></div>
+        </div>
+        <button class="primary" onclick="recordDetection()">Record detection now</button>
+        <div id="attMsg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Today's status</h2>
+        <div class="row">
+          <div><label>Employee ID</label><input id="attCheckEmpId" placeholder="EMP-1001"></div>
+        </div>
+        <button class="secondary" onclick="checkToday()">Check</button>
+        <div id="attToday"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+// --- environment-aware backend URL resolver (Section 10.2 of the docs) ---
+function getBackendBaseUrl() {
+  const { protocol, hostname } = window.location;
+  if (hostname === "localhost" || hostname === "127.0.0.1") {
+    return "http://localhost:8001";
+  }
+  const match = hostname.match(/^(\d+)-(.+)$/);
+  if (match) {
+    return `${protocol}//8001-${match[2]}`;
+  }
+  return `${protocol}//${hostname}:8001`;
+}
+const API = getBackendBaseUrl();
+function getBackendWsUrl() {
+  return API.replace(/^http/, "ws");
+}
+let sessionToken = null;
+
+function authHeaders() {
+  return sessionToken ? { "Authorization": "Bearer " + sessionToken } : {};
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, { ...opts, headers: { ...(opts.headers||{}), ...authHeaders() } });
+  let body;
+  try { body = await res.json(); } catch { body = null; }
+  if (!res.ok) throw new Error((body && body.detail) || res.statusText);
+  return body;
+}
+
+function getOrgId() {
+  return parseInt(document.getElementById('globalOrgId').value, 10);
+}
+
+// Escapes text before it ever reaches innerHTML. Employee names/IDs,
+// workstation names, stream source URLs, and uploaded filenames are all
+// admin-supplied and get echoed back by the API -- without this, any of
+// them could carry a script tag that runs in another admin's browser
+// (a real stored/reflected XSS path, not a theoretical one, since
+// sessionToken lives in reachable scope on this same page).
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str === null || str === undefined ? '' : String(str);
+  return div.innerHTML;
+}
+
+function showMsg(elId, text, ok=true) {
+  document.getElementById(elId).innerHTML = `<div class="msg ${ok?'ok':'err'}">${escapeHtml(text)}</div>`;
+}
+
+// --- auth ---
+async function doLogin() {
+  const username = document.getElementById('loginUsername').value;
+  const password = document.getElementById('loginPassword').value;
+  try {
+    const body = await api('/admin/login', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ username, password }) });
+    sessionToken = body.session_token;
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+
+    // An org-scoped HR_ADMIN can only ever act on their own org, so start
+    // the global Org ID field there and lock it -- there's no valid other
+    // value for them to enter. A SUPER_ADMIN has no fixed org (org_id is
+    // null), so the field stays editable, defaulting to 1.
+    const orgField = document.getElementById('globalOrgId');
+    if (body.role === 'SUPER_ADMIN') {
+      orgField.value = '1';
+      orgField.disabled = false;
+      document.getElementById('whoAmI').textContent = `${username} · SUPER_ADMIN (all orgs)`;
+    } else {
+      orgField.value = String(body.org_id);
+      orgField.disabled = true;
+      document.getElementById('whoAmI').textContent = `${username} · org ${body.org_id}`;
+    }
+
+    checkBackend();
+    loadIdentityStatus(); loadWorkstations(); loadEmployees();
+  } catch (e) {
+    showMsg('loginMsg', 'Login failed: ' + e.message, false);
+  }
+}
+function logout() {
+  sessionToken = null;
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginScreen').style.display = 'flex';
+}
+async function checkBackend() {
+  try { await api('/'); document.getElementById('backendStatus').textContent = 'backend connected: ' + API; }
+  catch { document.getElementById('backendStatus').textContent = 'backend unreachable at ' + API; }
+}
+
+function showTab(name) {
+  document.querySelectorAll('main section').forEach(s => s.style.display = 'none');
+  document.getElementById('tab-'+name).style.display = 'block';
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+}
+
+// --- dashboard ---
+async function loadIdentityStatus() {
+  try {
+    const camId = document.getElementById('dashCamId').value;
+    const body = await api(`/workstations/identity_status?org_id=${getOrgId()}&cam_id=${camId}`);
+    const rows = body.workstations.map(w => `<tr>
+      <td>${escapeHtml(w.name)}</td><td>${escapeHtml(w.occupancy_status)}</td><td>${escapeHtml(w.assigned_employee_id)||'—'}</td>
+      <td>${escapeHtml(w.detected_employee_id)||'—'}</td><td><span class="badge ${w.match_status}">${escapeHtml(w.match_status)}</span></td>
+      <td>${w.similarity!=null?w.similarity.toFixed(3):'—'}</td></tr>`).join('');
+    document.getElementById('statusTable').innerHTML = rows || '<tr><td colspan="6">No workstations yet — add one in the Workstations tab.</td></tr>';
+  } catch (e) { showMsg('statusMsg', e.message, false); }
+}
+
+// --- workstations / ROI drawing ---
+let roiImg = null, roiStart = null, roiRect = null;
+function loadRoiImage(evt) {
+  const file = evt.target.files[0];
+  const reader = new FileReader();
+  reader.onload = e => {
+    roiImg = new Image();
+    roiImg.onload = () => drawRoiCanvas();
+    roiImg.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+function drawRoiCanvas() {
+  const canvas = document.getElementById('roiCanvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if (roiImg) ctx.drawImage(roiImg, 0, 0, canvas.width, canvas.height);
+  if (roiRect) {
+    ctx.strokeStyle = '#5D5FEF'; ctx.lineWidth = 2;
+    ctx.strokeRect(roiRect.x, roiRect.y, roiRect.w, roiRect.h);
+  }
+}
+const canvas = document.getElementById('roiCanvas');
+canvas.addEventListener('mousedown', e => {
+  const r = canvas.getBoundingClientRect();
+  roiStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+});
+canvas.addEventListener('mousemove', e => {
+  if (!roiStart) return;
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  roiRect = { x: Math.min(roiStart.x,x), y: Math.min(roiStart.y,y), w: Math.abs(x-roiStart.x), h: Math.abs(y-roiStart.y) };
+  drawRoiCanvas();
+});
+canvas.addEventListener('mouseup', () => {
+  roiStart = null;
+  if (roiRect) {
+    const x1 = roiRect.x / canvas.width, y1 = roiRect.y / canvas.height;
+    const x2 = (roiRect.x+roiRect.w) / canvas.width, y2 = (roiRect.y+roiRect.h) / canvas.height;
+    document.getElementById('roiCoordsPreview').textContent =
+      `Normalized ROI: x1=${x1.toFixed(3)} y1=${y1.toFixed(3)} x2=${x2.toFixed(3)} y2=${y2.toFixed(3)}`;
+    canvas.dataset.x1=x1; canvas.dataset.y1=y1; canvas.dataset.x2=x2; canvas.dataset.y2=y2;
+  }
+});
+async function saveWorkstation() {
+  const org_id = getOrgId();
+  const cam_id = parseInt(document.getElementById('roiCamId').value);
+  const name = document.getElementById('roiName').value;
+  if (!name || canvas.dataset.x1 === undefined) { showMsg('roiMsg','Draw a rectangle and name it first.', false); return; }
+  try {
+    await api('/workstations/save', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      org_id, cam_id, workstations: [{ name, x1:+canvas.dataset.x1, y1:+canvas.dataset.y1, x2:+canvas.dataset.x2, y2:+canvas.dataset.y2 }]
+    })});
+    showMsg('roiMsg', `Saved workstation "${name}".`);
+    loadWorkstations();
+  } catch (e) { showMsg('roiMsg', e.message, false); }
+}
+async function loadWorkstations() {
+  try {
+    const camId = document.getElementById('roiCamId').value;
+    const body = await api(`/workstations/check?org_id=${getOrgId()}&cam_id=${camId}`);
+    document.getElementById('workstationsTable').innerHTML = body.workstations.map(w =>
+      `<tr><td>${escapeHtml(w.name)}</td><td>${w.x1.toFixed(2)}, ${w.y1.toFixed(2)}, ${w.x2.toFixed(2)}, ${w.y2.toFixed(2)}</td></tr>`
+    ).join('') || '<tr><td colspan="2">None yet.</td></tr>';
+  } catch (e) { console.error(e); }
+}
+async function assignEmployee() {
+  const workstation_name = document.getElementById('assignWsName').value;
+  const employee_id = document.getElementById('assignEmpId').value;
+  const cam_id = parseInt(document.getElementById('roiCamId').value);
+  try {
+    await api('/workstations/assign', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      org_id: getOrgId(), cam_id, workstation_name, employee_id, effective_from: new Date().toISOString().slice(0,10)
+    })});
+    showMsg('assignMsg', `Assigned ${employee_id} to ${workstation_name}.`);
+    loadIdentityStatus();
+  } catch (e) { showMsg('assignMsg', e.message, false); }
+}
+
+// --- employees ---
+async function enrollEmployee() {
+  const fd = new FormData();
+  fd.append('org_id', getOrgId());
+  fd.append('employee_id', document.getElementById('enrollId').value);
+  fd.append('name', document.getElementById('enrollName').value);
+  fd.append('view', document.getElementById('enrollView').value);
+  fd.append('depth_m', 1.0);
+  const photo = document.getElementById('enrollPhoto').files[0];
+  if (!photo) { showMsg('enrollMsg', 'Choose a photo first.', false); return; }
+  fd.append('photo', photo);
+  try {
+    const body = await api('/employees/enroll', { method:'POST', body: fd });
+    showMsg('enrollMsg', `Enrolled ${body.employee_id}: views so far [${body.views_captured.join(', ')}] — face backend: ${body.face_backend}`);
+    loadEmployees();
+  } catch (e) { showMsg('enrollMsg', e.message, false); }
+}
+async function loadEmployees() {
+  try {
+    const body = await api('/employees/list?org_id=' + getOrgId());
+    document.getElementById('employeesTable').innerHTML = body.employees.map(e =>
+      `<tr><td>${escapeHtml(e.employee_id)}</td><td>${escapeHtml(e.name)}</td><td>${e.active?'yes':'no'}</td></tr>`
+    ).join('') || '<tr><td colspan="3">None yet.</td></tr>';
+  } catch (e) { console.error(e); }
+}
+
+// --- try detection ---
+async function runDetection() {
+  const fd = new FormData();
+  fd.append('org_id', getOrgId());
+  fd.append('cam_id', document.getElementById('detCamId').value);
+  fd.append('workstation_name', document.getElementById('detWsName').value);
+  const frame = document.getElementById('detFrame').files[0];
+  if (!frame) { showMsg('detResult', 'Choose a photo first.', false); return; }
+  fd.append('frame', frame);
+  document.getElementById('detResult').innerHTML = '<div class="msg ok">Running YOLO + face matching…</div>';
+  try {
+    const body = await api('/workstations/simulate_detection', { method:'POST', body: fd });
+    document.getElementById('detResult').innerHTML = `
+      <div class="msg ok">
+        People detected: <b>${body.people_detected}</b> · Occupied: <b>${body.occupied}</b><br>
+        Result: <span class="badge ${body.event_type}">${escapeHtml(body.event_type)}</span>
+        assigned=${escapeHtml(body.assigned_employee_id)||'—'} detected=${escapeHtml(body.detected_employee_id)||'—'}
+        similarity=${body.similarity!=null?body.similarity.toFixed(3):'—'}<br>
+        Face backend: ${escapeHtml(body.face_backend)}
+      </div>`;
+    loadIdentityStatus();
+  } catch (e) { showMsg('detResult', e.message, false); }
+}
+
+// --- live stream ---
+async function startStream() {
+  const source = document.getElementById('streamSource').value;
+  const org_id = getOrgId();
+  const cam_id = parseInt(document.getElementById('streamCamId').value);
+  const maxFramesVal = document.getElementById('streamMaxFrames').value;
+  const payload = { source, org_id, cam_id, user_id: 1, poll_interval_seconds: 0.3 };
+  if (maxFramesVal) payload.max_frames = parseInt(maxFramesVal);
+  try {
+    const body = await api('/streams/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    showMsg('streamMsg', `Started stream ${body.stream_id}. It's running in a background thread on the server now.`);
+    loadStreams();
+  } catch (e) { showMsg('streamMsg', e.message, false); }
+}
+async function stopStream(streamId) {
+  try {
+    await api('/streams/stop', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ stream_id: streamId, org_id: getOrgId() }) });
+    loadStreams();
+  } catch (e) { console.error(e); }
+}
+async function loadStreams() {
+  try {
+    const body = await api('/streams/list?org_id=' + getOrgId());
+    document.getElementById('streamsTable').innerHTML = body.streams.map(s => `<tr>
+      <td>${escapeHtml(s.stream_id.slice(0,8))}…</td><td>${escapeHtml(s.source)}</td>
+      <td><span class="badge ${s.is_alive?'MATCH':'VACANT'}">${s.is_alive?'running':'stopped'}</span></td>
+      <td>${s.frames_processed}</td><td>${s.source_opened?'yes':'no'}</td>
+      <td><button class="secondary" onclick="stopStream('${s.stream_id}')">Stop</button></td>
+    </tr>`).join('') || '<tr><td colspan="6">No streams started yet.</td></tr>';
+  } catch (e) { console.error(e); }
+}
+
+// --- attendance ---
+async function recordDetection() {
+  try {
+    const body = await api('/attendance/record_detection', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      org_id: getOrgId(),
+      employee_id: document.getElementById('attEmpId').value,
+      location: document.getElementById('attLocation').value,
+    })});
+    showMsg('attMsg', `${body.employee_id}: ${body.status} (signed in ${body.sign_in_time})`);
+  } catch (e) { showMsg('attMsg', e.message, false); }
+}
+async function checkToday() {
+  try {
+    const body = await api(`/attendance/today?org_id=${getOrgId()}&employee_id=` + document.getElementById('attCheckEmpId').value);
+    document.getElementById('attToday').innerHTML = `<div class="msg ok">
+      Status: <span class="badge ${body.status}">${escapeHtml(body.status)}</span> ·
+      Sign-in: ${escapeHtml(body.sign_in_time)} · Sign-out: ${escapeHtml(body.sign_out_time) || '—'} ·
+      Last seen: ${escapeHtml(body.last_seen_workstation) || '—'}</div>`;
+  } catch (e) { showMsg('attToday', e.message, false); }
+}
+
+// --- video analysis (upload with real progress, then live WebSocket results) ---
+let uploadedVideoId = null;
+let pendingFile = null;   // the File object, held while we ask "already uploaded?" before committing to a real upload
+
+async function sha256OfFile(file) {
+  // Computed entirely in the browser (Web Crypto API) -- this is what
+  // makes duplicate detection actually efficient: we know whether the
+  // content already exists BEFORE sending a single byte of a large video
+  // over the network, rather than uploading it fully and only then
+  // discovering it was a duplicate.
+  const buffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function onVideoFileSelected(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  uploadedVideoId = null;
+  pendingFile = file;
+  document.getElementById('analysisDefaults').style.display = 'none';
+  document.getElementById('runAnalysisBtn').style.display = 'none';
+  document.getElementById('analysisResultsCard').style.display = 'none';
+  document.getElementById('uploadMsg').innerHTML = '';
+  document.getElementById('duplicateFoundCard').style.display = 'none';
+
+  document.getElementById('hashCheckMsg').textContent = 'Checking whether this video is already uploaded…';
+  let hash;
+  try {
+    hash = await sha256OfFile(file);
+  } catch (e) {
+    document.getElementById('hashCheckMsg').textContent = '';
+    uploadVideoFile(file);  // hashing failed (e.g. unsupported browser) -- fall back to a normal upload
+    return;
+  }
+  pendingFile._computedHash = hash;
+
+  try {
+    const check = await api(`/videos/find_by_hash?org_id=${getOrgId()}&file_hash=${hash}`);
+    document.getElementById('hashCheckMsg').textContent = '';
+    if (check.found) {
+      document.getElementById('duplicateFoundDetails').textContent =
+        `Already uploaded as "${check.filename}" (${(check.size_bytes/1024/1024).toFixed(1)} MB, video_id ${check.video_id}).`;
+      document.getElementById('duplicateFoundCard').dataset.videoId = check.video_id;
+      document.getElementById('duplicateFoundCard').dataset.filename = check.filename;
+      document.getElementById('duplicateFoundCard').style.display = 'block';
+      return;  // wait for the user to choose "select existing" or "upload anyway"
+    }
+  } catch (e) {
+    document.getElementById('hashCheckMsg').textContent = '';
+    // Duplicate check failed for some reason (e.g. not logged in yet) --
+    // don't block the user, just proceed to a normal upload.
+  }
+  uploadVideoFile(file);
+}
+
+function useExistingVideo() {
+  const card = document.getElementById('duplicateFoundCard');
+  uploadedVideoId = card.dataset.videoId;
+  card.style.display = 'none';
+  showMsg('uploadMsg', `Selected existing video "${card.dataset.filename}". Ready to analyze — no re-upload needed.`);
+  document.getElementById('analysisDefaults').style.display = 'block';
+  document.getElementById('runAnalysisBtn').style.display = 'inline-block';
+}
+
+function dismissDuplicateAndUploadAnyway() {
+  document.getElementById('duplicateFoundCard').style.display = 'none';
+  if (pendingFile) uploadVideoFile(pendingFile);
+}
+
+function uploadVideoFile(file) {
+  const wrap = document.getElementById('uploadProgressWrap');
+  const bar = document.getElementById('uploadProgressBar');
+  const label = document.getElementById('uploadProgressLabel');
+  wrap.style.display = 'block';
+  bar.style.width = '0%';
+  label.textContent = '0%';
+
+  const fd = new FormData();
+  fd.append('org_id', getOrgId()); // the video is owned by whichever org you're currently acting as
+  fd.append('file', file);
+
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', API + '/videos/upload');
+  xhr.setRequestHeader('Authorization', 'Bearer ' + sessionToken);
+
+  // This is the real upload progress — actual bytes sent to the server,
+  // not a simulated timer, reported natively by the browser.
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round((e.loaded / e.total) * 100);
+    bar.style.width = pct + '%';
+    label.textContent = pct + '%';
+  };
+
+  xhr.onload = () => {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      const body = JSON.parse(xhr.responseText);
+      uploadedVideoId = body.video_id;
+      showMsg('uploadMsg', `Uploaded "${body.filename}" (${(body.size_bytes/1024/1024).toFixed(1)} MB). Ready to analyze.`);
+      document.getElementById('analysisDefaults').style.display = 'block';
+      document.getElementById('runAnalysisBtn').style.display = 'inline-block';
+    } else {
+      showMsg('uploadMsg', 'Upload failed: ' + xhr.responseText, false);
+    }
+  };
+  xhr.onerror = () => showMsg('uploadMsg', 'Upload failed — network error.', false);
+  xhr.send(fd);
+}
+
+async function runAiAnalysis() {
+  if (!uploadedVideoId) return;
+  const fd = new FormData();
+  const orgId = document.getElementById('vaOrgId').value;
+  const camId = document.getElementById('vaCamId').value;
+  const userId = document.getElementById('vaUserId').value;
+  if (orgId) fd.append('org_id', orgId);
+  if (camId) fd.append('cam_id', camId);
+  if (userId) fd.append('user_id', userId);
+  fd.append('poll_interval_seconds', 0);
+
+  document.getElementById('analysisResultsCard').style.display = 'block';
+  document.getElementById('analysisEventLog').innerHTML = '';
+  document.getElementById('analysisStatusMsg').textContent = 'Starting analysis…';
+
+  let body;
+  try {
+    body = await api(`/videos/${uploadedVideoId}/analyze`, { method: 'POST', body: fd });
+  } catch (e) {
+    document.getElementById('analysisStatusMsg').textContent = 'Failed to start: ' + e.message;
+    return;
+  }
+
+  const usedDefaults = Object.entries(body.defaults_used).filter(([k, v]) => v).map(([k]) => k);
+  document.getElementById('analysisStatusMsg').innerHTML =
+    `Analyzing on <b>${escapeHtml(body.workstation_name)}</b> (org=${body.org_id}, cam=${body.cam_id})` +
+    (usedDefaults.length ? ` — defaults used for: ${usedDefaults.join(', ')}` : ' — using your specified parameters');
+
+  // Same real-time push mechanism a live RTSP camera stream uses —
+  // this is not a simulation, it's the identical WebSocket endpoint.
+  const ws = new WebSocket(`${getBackendWsUrl()}/ws/streams/${body.stream_id}?token=${sessionToken}`);
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === 'progress' && msg.total_frames) {
+      const pct = Math.round((msg.frames_processed / msg.total_frames) * 100);
+      document.getElementById('analysisProgressBar').style.width = pct + '%';
+      document.getElementById('analysisProgressLabel').textContent = pct + '%';
+    } else if (msg.type === 'event') {
+      const log = document.getElementById('analysisEventLog');
+      const line = document.createElement('div');
+      line.className = 'line';
+      line.innerHTML = `<span>Frame ${msg.frame_number} — ${escapeHtml(msg.workstation_name)}</span>
+        <span class="badge ${msg.event_type}">${escapeHtml(msg.event_type)}</span>`;
+      log.prepend(line);
+    } else if (msg.type === 'completed') {
+      document.getElementById('analysisStatusMsg').innerHTML += ' — <b>Analysis complete.</b>';
+      document.getElementById('analysisProgressBar').style.width = '100%';
+      document.getElementById('analysisProgressLabel').textContent = '100%';
+      loadIdentityStatus();
+      ws.close();
+    } else if (msg.type === 'error') {
+      document.getElementById('analysisStatusMsg').innerHTML += ` — <span style="color:#C0392B">${escapeHtml(msg.message)}</span>`;
+    }
+  };
+  ws.onerror = () => { document.getElementById('analysisStatusMsg').innerHTML += ' — WebSocket error.'; };
+}
+</script>
+</body>
+</html>

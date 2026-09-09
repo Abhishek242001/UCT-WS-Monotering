@@ -1,0 +1,18 @@
+# Test-suite dependencies for the Employee Identity-Aware Workstation
+# Monitoring & Attendance System.
+#
+# NOTE: this covers the mock/contract test layer only (FastAPI mock app +
+# pure business-logic unit tests + SQLite constraint tests). It deliberately
+# does NOT include the real computer-vision stack (insightface, onnxruntime,
+# ultralytics, opencv-python) -- those belong in the production service's
+# own requirements.txt and are only needed once the skipped
+# hardware/integration tests in test_performance_optimization.py and
+# test_security.py are being un-skipped against a real implementation.
+
+fastapi==0.141.1
+uvicorn==0.34.0
+httpx==0.28.1
+pytest==9.1.1
+pytest-cov==6.0.0
+numpy==2.4.4
+pydantic==2.10.0

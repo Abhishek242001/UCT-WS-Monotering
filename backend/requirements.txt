@@ -1,0 +1,19 @@
+# Core backend -- verified installable and working in a constrained
+# environment (no GPU, limited disk). Real YOLO person detection works
+# out of the box with these. Face recognition runs in documented stub
+# mode until requirements-face-recognition.txt is also installed.
+
+fastapi==0.141.1
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.52
+pydantic==2.10.0
+python-multipart==0.0.20
+numpy>=1.26
+scipy>=1.11
+opencv-python-headless>=4.9
+ultralytics>=8.3
+
+# Testing
+pytest==9.1.1
+pytest-cov==6.0.0
+httpx==0.28.1

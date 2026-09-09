@@ -1,0 +1,15 @@
+# Optional: install this to activate REAL InsightFace-based face
+# recognition instead of the documented stub (see
+# backend/app/vision/face_embedder.py for exactly how the switch works --
+# no code changes needed, just install these and restart the server).
+#
+# VERIFIED WORKING in this project's own build: the buffalo_s model
+# downloaded successfully (~124MB, from the deepinsight/insightface GitHub
+# releases) and correctly discriminated real faces -- same person
+# re-extracted: cosine similarity 1.0; two different people: ~-0.03.
+# Kept as an opt-in install (not in the default requirements.txt) because
+# the model download requires internet access and adds real install time,
+# not because it's unproven.
+
+insightface>=0.7.3
+onnxruntime>=1.19
