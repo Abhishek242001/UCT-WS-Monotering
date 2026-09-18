@@ -104,6 +104,11 @@
     </div>
     <button class="primary" style="width:100%" onclick="doLogin()">Sign in</button>
     <p class="hint">Default credentials are printed to the backend's console the first time it starts. Change them via DEFAULT_ADMIN_USERNAME / DEFAULT_ADMIN_PASSWORD in your .env.</p>
+    <p class="hint" id="loginApiTarget" style="word-break:break-all">Backend target: resolving…</p>
+    <p class="hint">
+      <a href="#" onclick="downloadAppLog(); return false;">Download debug log</a>
+      &nbsp;·&nbsp; If login fails, this log (plus your browser's devtools Console/Network tab) has the actual error.
+    </p>
   </div>
 </div>
 
@@ -118,6 +123,7 @@
     <div class="status" style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">
       <span id="whoAmI"></span>
       <span id="backendStatus">connecting…</span>
+      <a href="#" onclick="downloadAppLog(); return false;" style="color:#CFCFFA">Download debug log</a>
     </div>
     <button class="secondary" style="margin-left:14px" onclick="logout()">Sign out</button>
   </header>
@@ -323,6 +329,54 @@
 </div>
 
 <script>
+// --- lightweight client-side debug log -------------------------------
+// The browser sandbox means JS cannot write a real file to disk on its
+// own; this instead buffers every console.log/info/warn/error call
+// (persisted to localStorage so it survives a reload) and offers it as a
+// downloadable .txt via the "Download debug log" button below the login
+// form and in the header. This is what gives you a "frontend log file"
+// to inspect -- since a CORS rejection is enforced by the browser itself,
+// nothing about it ever reaches the backend's log, so this is the only
+// place it can be captured.
+const APP_LOG_KEY = "uct_debug_log_v1";
+const APP_LOG_MAX_ENTRIES = 500;
+function loadAppLog() {
+  try { return JSON.parse(localStorage.getItem(APP_LOG_KEY) || "[]"); } catch { return []; }
+}
+let appLog = loadAppLog();
+function pushAppLog(level, args) {
+  const msg = args.map(a => {
+    if (typeof a === "string") return a;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }).join(" ");
+  appLog.push({ t: new Date().toISOString(), level, msg });
+  if (appLog.length > APP_LOG_MAX_ENTRIES) appLog = appLog.slice(-APP_LOG_MAX_ENTRIES);
+  try { localStorage.setItem(APP_LOG_KEY, JSON.stringify(appLog)); } catch { /* storage full/unavailable -- log still shows in devtools console */ }
+}
+["log", "info", "warn", "error"].forEach(level => {
+  const original = console[level].bind(console);
+  console[level] = (...args) => { pushAppLog(level, args); original(...args); };
+});
+function downloadAppLog() {
+  const header = `UCT Workstation Monitor -- frontend debug log
+page origin: ${window.location.origin}
+resolved backend API base URL: ${typeof API !== "undefined" ? API : "(not yet resolved)"}
+generated: ${new Date().toISOString()}
+
+`;
+  const text = header + appLog.map(l => `${l.t} [${l.level}] ${l.msg}`).join("\n");
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `uct-frontend-log-${Date.now()}.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function clearAppLog() {
+  appLog = [];
+  try { localStorage.removeItem(APP_LOG_KEY); } catch {}
+}
+
 // --- environment-aware backend URL resolver (Section 10.2 of the docs) ---
 function getBackendBaseUrl() {
   const { protocol, hostname } = window.location;
@@ -339,6 +393,11 @@ const API = getBackendBaseUrl();
 function getBackendWsUrl() {
   return API.replace(/^http/, "ws");
 }
+console.log("Page origin:", window.location.origin, "| Resolved backend API base URL:", API);
+document.addEventListener("DOMContentLoaded", () => {
+  const el = document.getElementById("loginApiTarget");
+  if (el) el.textContent = `Backend target: ${API}`;
+});
 let sessionToken = null;
 
 function authHeaders() {
@@ -346,10 +405,32 @@ function authHeaders() {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(API + path, { ...opts, headers: { ...(opts.headers||{}), ...authHeaders() } });
+  const url = API + path;
+  console.log("API request:", opts.method || "GET", url);
+  let res;
+  try {
+    res = await fetch(url, { ...opts, headers: { ...(opts.headers||{}), ...authHeaders() } });
+  } catch (networkErr) {
+    // fetch() throws a generic, detail-free TypeError for BOTH a CORS
+    // rejection and a genuine network/connection failure -- the browser
+    // deliberately hides which one it was from JS. Log everything we DO
+    // know so the downloaded log is still actionable without devtools.
+    console.error(
+      "API network error:", opts.method || "GET", url, "-", networkErr.message,
+      "| page origin:", window.location.origin,
+      "| Usually either the backend is unreachable, or this is a CORS rejection",
+      "(check the browser's Network/Console tab for a 'blocked by CORS policy' message).",
+      "If it is CORS: the backend's FRONTEND_ORIGIN must include exactly", window.location.origin
+    );
+    throw new Error(`Could not reach ${url}. This is usually a CORS or network issue -- check the browser console, and confirm the backend's FRONTEND_ORIGIN includes ${window.location.origin}.`);
+  }
   let body;
   try { body = await res.json(); } catch { body = null; }
-  if (!res.ok) throw new Error((body && body.detail) || res.statusText);
+  if (!res.ok) {
+    console.error("API error response:", res.status, opts.method || "GET", url, body);
+    throw new Error((body && body.detail) || res.statusText);
+  }
+  console.log("API response:", res.status, opts.method || "GET", url);
   return body;
 }
 
@@ -412,7 +493,10 @@ function logout() {
 }
 async function checkBackend() {
   try { await api('/'); document.getElementById('backendStatus').textContent = 'backend connected: ' + API; }
-  catch { document.getElementById('backendStatus').textContent = 'backend unreachable at ' + API; }
+  catch (e) {
+    document.getElementById('backendStatus').textContent = 'backend unreachable at ' + API;
+    console.error('checkBackend failed:', e.message);
+  }
 }
 
 function showTab(name) {

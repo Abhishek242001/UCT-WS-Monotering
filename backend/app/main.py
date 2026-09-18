@@ -1,7 +1,19 @@
+import logging
 import os
+import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from app.logging_config import setup_logging
+
+# Must run before anything else grabs a logger (routers/streams_ws.py does,
+# at import time) so every logger in the process ends up pointed at the
+# same file+console handlers instead of falling back to logging's default
+# "no handlers found" console-only behavior.
+setup_logging()
+logger = logging.getLogger("app.main")
 
 from app.database import init_db
 from app import database as db_module
@@ -22,14 +34,62 @@ app = FastAPI(
 # Lightning.ai frontend subdomain, or http://localhost:8002 for local dev).
 # Never use "*" once credentials/session cookies are in play (Section 10.3
 # of the project documentation).
-_frontend_origin = os.environ.get("FRONTEND_ORIGIN", "http://localhost:8002")
+#
+# Accepts a COMMA-SEPARATED list so local dev and a Lightning.ai Studio can
+# both be allowed at once without editing .env every time you switch
+# between them -- still an explicit allow-list, never a wildcard.
+_frontend_origin_raw = os.environ.get("FRONTEND_ORIGIN", "http://localhost:8002")
+_frontend_origins = [o.strip() for o in _frontend_origin_raw.split(",") if o.strip()]
+if not _frontend_origins:
+    _frontend_origins = ["http://localhost:8002"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_frontend_origin],
+    allow_origins=_frontend_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Logs every request to backend/logs/backend.log, including the
+    browser's Origin header and whether the response actually carries an
+    Access-Control-Allow-Origin header -- the single fastest way to
+    confirm, from the log file alone, whether a "CORS error" in the
+    browser is really an origin mismatch (this middleware will show
+    cors_header_present=NO) versus the backend being unreachable at all
+    (nothing will be logged for that request).
+
+    Added AFTER CORSMiddleware above so it wraps OUTSIDE it and therefore
+    still sees rejected preflight (OPTIONS) requests, which CORSMiddleware
+    answers directly without forwarding to the route handlers.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.monotonic()
+        origin = request.headers.get("origin", "-")
+        response = None
+        try:
+            response = await call_next(request)
+            return response
+        except Exception:
+            logger.exception("Unhandled error for %s %s", request.method, request.url.path)
+            raise
+        finally:
+            duration_ms = (time.monotonic() - start) * 1000
+            status = response.status_code if response is not None else 599
+            cors_note = ""
+            if origin != "-":
+                acao = response.headers.get("access-control-allow-origin") if response is not None else None
+                cors_note = f" cors_header_present={'yes' if acao else 'NO (check FRONTEND_ORIGIN)'}"
+            logger.info(
+                "%s %s -> %s (%.1fms) origin=%s%s",
+                request.method, request.url.path, status, duration_ms, origin, cors_note,
+            )
+
+
+app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(streams.router)
 app.include_router(workstations.router)
@@ -42,9 +102,16 @@ app.include_router(reports_and_health.router)
 app.include_router(videos.router)
 app.include_router(streams_ws.router)
 
+# NOTE: "/" (used by the frontend's checkBackend() as a liveness check) is
+# already defined in routers/streams.py's health() -- no separate root
+# route needed here. (An earlier draft of this file added a duplicate
+# "/" here on the mistaken assumption that no root route existed; it
+# didn't -- streams.router's is included above and handles it.)
+
 
 @app.on_event("startup")
 def on_startup():
+    logger.info("Allowed CORS origins (FRONTEND_ORIGIN): %s", _frontend_origins)
     init_db()
     _seed_default_admin()
 
