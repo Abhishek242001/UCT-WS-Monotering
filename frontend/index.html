@@ -75,6 +75,7 @@
   .msg{ padding:10px 14px; border-radius:6px; font-size:13px; margin-bottom:14px; }
   .msg.ok{ background:#E5F7EE; color:#1D8F5E; }
   .msg.err{ background:#FDEDED; color:#C0392B; }
+  #zipExample{ background:#F5F6FA; border:1px solid #E3E5EE; border-radius:6px; padding:12px 14px; font-size:12px; line-height:1.6; overflow-x:auto; margin:8px 0; }
   #roiCanvas{ border:1px dashed var(--border); border-radius:8px; max-width:100%; cursor:crosshair; }
   .progress-outer{ background:#EEEEF6; border-radius:20px; height:18px; overflow:hidden; margin:10px 0; }
   .progress-inner{ background:linear-gradient(90deg, var(--indigo), var(--indigo-light)); height:100%; width:0%;
@@ -130,7 +131,7 @@
   <nav>
     <button class="active" onclick="showTab('dashboard')">Dashboard</button>
     <button onclick="showTab('workstations')">Workstations</button>
-    <button onclick="showTab('employees')">Employees</button>
+    <button onclick="showTab('employees'); loadDeclaredDistances();">Employees</button>
     <button onclick="showTab('detect')">Try Detection</button>
     <button onclick="showTab('livestream')">Live Stream</button>
     <button onclick="showTab('videoanalysis')">Video Analysis</button>
@@ -210,9 +211,43 @@
       </div>
 
       <div class="card">
+        <h2>Bulk enroll from a dataset zip</h2>
+        <p class="hint">For datasets captured at multiple distances (like a calibration shoot). Upload one zip per employee; every view (front/left/right/top) at the closest distance is enrolled immediately, and the zip is kept so "Train model" below can use every distance to fit the distance-matching curve.</p>
+        <div id="zipDistancesWrap"></div>
+        <div class="row" style="margin-top:10px">
+          <div><label>Employee ID</label><input id="zipEmpId" placeholder="EMP-1001"></div>
+          <div><label>Name</label><input id="zipEmpName" placeholder="Jane Doe"></div>
+          <div><label>Department</label><input id="zipEmpDept" placeholder="e.g. Engineering"></div>
+        </div>
+        <label style="margin-top:10px">Employee's zip file</label>
+        <input type="file" id="zipEmpFile" accept=".zip">
+        <p class="hint">Expected folder layout inside the zip (folder name can be anything -- matched to the Employee ID above, not the folder name):</p>
+        <pre id="zipExample">your-upload.zip
+└── &lt;any-folder-name&gt;/
+    ├── depth_000.50m/
+    │   ├── front.jpg
+    │   ├── left.jpg
+    │   ├── right.jpg
+    │   └── top.jpg
+    ├── depth_001m/
+    │   └── ... same 4 files
+    └── depth_002m/
+        └── ... same 4 files</pre>
+        <button class="primary" onclick="enrollEmployeeFromZip()">Enroll this employee</button>
+        <div id="zipEnrollMsg"></div>
+      </div>
+
+      <div class="card">
+        <h2>Train model</h2>
+        <p class="hint">Fits the distance-matching curve (near_k / near_sigma0) using every employee enrolled via the zip flow above who has 2+ distances. Safe to re-run any time -- e.g. after adding more employees.</p>
+        <button class="primary" onclick="runCalibrationAll()">Train model</button>
+        <div id="trainMsg"></div>
+      </div>
+
+      <div class="card">
         <h2>Enrolled employees</h2>
         <table>
-          <thead><tr><th>Employee ID</th><th>Name</th><th>Active</th></tr></thead>
+          <thead><tr><th>Employee ID</th><th>Name</th><th>Department</th><th>Active</th></tr></thead>
           <tbody id="employeesTable"></tbody>
         </table>
         <button class="secondary" onclick="loadEmployees()">Refresh</button>
@@ -619,9 +654,92 @@ async function loadEmployees() {
   try {
     const body = await api('/employees/list?org_id=' + getOrgId());
     document.getElementById('employeesTable').innerHTML = body.employees.map(e =>
-      `<tr><td>${escapeHtml(e.employee_id)}</td><td>${escapeHtml(e.name)}</td><td>${e.active?'yes':'no'}</td></tr>`
-    ).join('') || '<tr><td colspan="3">None yet.</td></tr>';
+      `<tr><td>${escapeHtml(e.employee_id)}</td><td>${escapeHtml(e.name)}</td><td>${escapeHtml(e.department)||'—'}</td><td>${e.active?'yes':'no'}</td></tr>`
+    ).join('') || '<tr><td colspan="4">None yet.</td></tr>';
   } catch (e) { console.error(e); }
+}
+
+// --- bulk zip enrollment ---
+// The distance set (e.g. "0.5,1,2,3,4,5") is a per-org invariant: the
+// FIRST zip enrolled for an org fixes it (via enroll_from_zip's own
+// validation), and /employees/enrolled_distances/{org_id} reports back
+// whatever was fixed so every later admin/employee reuses the same set
+// instead of each zip declaring its own. We mirror that here by locking
+// the input once the backend reports a non-null set, rather than letting
+// the UI suggest distances can still be freely chosen after the first one.
+let lockedDistances = null;
+
+async function loadDeclaredDistances() {
+  try {
+    const body = await api('/employees/enrolled_distances/' + getOrgId());
+    lockedDistances = body.distances;
+  } catch (e) {
+    console.error('loadDeclaredDistances failed:', e.message);
+    lockedDistances = null;
+  }
+  renderDistanceField();
+}
+
+function renderDistanceField() {
+  const wrap = document.getElementById('zipDistancesWrap');
+  if (lockedDistances && lockedDistances.length) {
+    wrap.innerHTML = `<div class="hint">Distances locked for this organization (set by the first employee enrolled this way): <b>${lockedDistances.map(d => d + 'm').join(', ')}</b>. Every zip's depth_XXXm folders are checked against this same list.</div>`;
+  } else {
+    wrap.innerHTML = `<label>Distances used in this dataset (comma-separated, meters)</label>
+      <input id="zipDistancesInput" placeholder="e.g. 0.5,1,2,3,4,5">
+      <p class="hint">This is the FIRST employee for this organization, so whatever you enter here fixes the distance set for every employee enrolled afterward.</p>`;
+  }
+}
+
+function currentDistancesValue() {
+  if (lockedDistances && lockedDistances.length) return lockedDistances.join(',');
+  const el = document.getElementById('zipDistancesInput');
+  return el ? el.value.trim() : '';
+}
+
+async function enrollEmployeeFromZip() {
+  const employee_id = document.getElementById('zipEmpId').value.trim();
+  const name = document.getElementById('zipEmpName').value.trim();
+  if (!employee_id || !name) { showMsg('zipEnrollMsg', 'Employee ID and Name are required.', false); return; }
+  const distances = currentDistancesValue();
+  if (!distances) { showMsg('zipEnrollMsg', 'Enter the distances used in this dataset first.', false); return; }
+  const zipFile = document.getElementById('zipEmpFile').files[0];
+  if (!zipFile) { showMsg('zipEnrollMsg', 'Choose this employee\'s zip file first.', false); return; }
+
+  const fd = new FormData();
+  fd.append('org_id', getOrgId());
+  fd.append('employee_id', employee_id);
+  fd.append('name', name);
+  const department = document.getElementById('zipEmpDept').value.trim();
+  if (department) fd.append('department', department);
+  fd.append('distances', distances);
+  fd.append('file', zipFile);
+
+  try {
+    const body = await api('/employees/enroll_from_zip', { method: 'POST', body: fd });
+    const parts = [`Enrolled ${body.employee_id} from reference distance ${body.reference_distance_m}m — views: [${body.views_enrolled.join(', ')}]`];
+    if (body.views_skipped.length) parts.push(`skipped: ${body.views_skipped.map(v => `${v.view} (${v.issue})`).join('; ')}`);
+    if (body.distance_folders_unexpected.length) parts.push(`ignored folders not matching declared distances: ${body.distance_folders_unexpected.join(', ')}`);
+    parts.push(body.calibration_ready
+      ? 'has 2+ distances — will contribute to "Train model".'
+      : 'only 1 usable distance — add more depth_XXXm folders for this employee to contribute to calibration.');
+    showMsg('zipEnrollMsg', parts.join(' | '), true);
+    loadDeclaredDistances();
+    loadEmployees();
+  } catch (e) { showMsg('zipEnrollMsg', e.message, false); }
+}
+
+async function runCalibrationAll() {
+  const fd = new FormData();
+  fd.append('org_id', getOrgId());
+  try {
+    const { job_id } = await api('/calibration/run_all', { method: 'POST', body: fd });
+    const status = await api('/calibration/status/' + job_id);
+    const r = status.result;
+    const parts = [`Model updated — near_k=${r.near_k}, near_sigma0=${r.near_sigma0}, people_enrolled=${r.people_enrolled}, data_points=${r.calibration_data_points}, face_backend=${r.face_backend}`];
+    if (r.people_with_single_distance_only.length) parts.push(`needs more distances to contribute: ${r.people_with_single_distance_only.join(', ')}`);
+    showMsg('trainMsg', parts.join(' | '), true);
+  } catch (e) { showMsg('trainMsg', e.message, false); }
 }
 
 // --- try detection ---

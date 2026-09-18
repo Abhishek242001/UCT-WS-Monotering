@@ -89,8 +89,8 @@ def list_employees(org_id: int, include_inactive: bool = False, db: Session = De
     if not include_inactive:
         query = query.filter_by(active=True)
     rows = query.all()
-    return {"employees": [{"employee_id": e.employee_id, "name": e.name, "active": e.active,
-                            "created_at": e.created_at} for e in rows]}
+    return {"employees": [{"employee_id": e.employee_id, "name": e.name, "department": e.department,
+                            "active": e.active, "created_at": e.created_at} for e in rows]}
 
 
 from pydantic import BaseModel  # noqa: E402
