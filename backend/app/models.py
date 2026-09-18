@@ -75,6 +75,7 @@ class Employee(Base):
     employee_id = Column(String, primary_key=True)
     org_id = Column(Integer, nullable=False)
     name = Column(String, nullable=False)
+    department = Column(String, nullable=True)
     active = Column(Boolean, default=True, nullable=False)
     created_at = Column(String, default=now_iso)
 
