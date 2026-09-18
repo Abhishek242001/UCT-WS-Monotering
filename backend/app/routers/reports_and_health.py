@@ -7,7 +7,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import WorkstationIdentityEvent, Employee, SystemHealthEvent, AdminSession
+from app.models import (WorkstationIdentityEvent, Employee, SystemHealthEvent, AdminSession,
+                         EmployeeFaceGallery, Workstation, WorkstationAssignment)
 from app.routers.admin_auth import require_admin, verify_org_access
 
 router = APIRouter(tags=["reports-and-health"])
@@ -105,6 +106,76 @@ def system_health(org_id: int, db: Session = Depends(get_db), admin: AdminSessio
         "annotated_video_playable_in_browser": ffmpeg_available,  # video_export.py re-encodes via this CLI
         "mp4v_video_writer_available": mp4v_writer_ok,
         "cameras": [],
+    }
+
+
+REQUIRED_VIEWS = ("front", "left", "right", "top")
+
+
+@router.get("/reports/face-recognition-readiness")
+def face_recognition_readiness(org_id: int, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """Answers "is all the information actually present for face
+    recognition to work" directly, rather than requiring someone to
+    manually cross-check the Employees and Workstations tabs. Checks,
+    per active employee: which of the 4 required views are enrolled, and
+    whether each enrolled view actually has a non-null embedding (a
+    gallery row can exist with embedding=NULL if extraction failed but
+    the row was still created -- checked for real here, not assumed
+    impossible). Checks, per saved workstation ROI: whether it currently
+    has an active employee assignment (effective_to IS NULL) -- an
+    unassigned workstation is a real gap: identify() will still run and
+    can return MISMATCH for a textbook-correct detection, not something
+    more obviously labeled "nobody assigned here", since
+    is_assigned_employee compares against None and is always False.
+
+    Does NOT report calibration/training status: the fitted near_k/
+    near_sigma0 curve is currently NOT consumed anywhere in the live
+    detection path (stream_worker.py, video_export.py, and
+    workstations.py's simulate_detection all use a fixed
+    snr = similarity * 10 placeholder instead) -- surfacing a "trained: yes"
+    field here would misleadingly imply it affects live matching today,
+    when it doesn't.
+    """
+    verify_org_access(admin, org_id)
+
+    employees = db.query(Employee).filter_by(org_id=org_id, active=True).all()
+    employee_readiness = []
+    for emp in employees:
+        gallery_rows = db.query(EmployeeFaceGallery).filter_by(employee_id=emp.employee_id).all()
+        views_present = {row.view for row in gallery_rows}
+        views_with_null_embedding = [row.view for row in gallery_rows if not row.embedding]
+        views_missing = [v for v in REQUIRED_VIEWS if v not in views_present]
+        employee_readiness.append({
+            "employee_id": emp.employee_id, "name": emp.name,
+            "views_enrolled": sorted(views_present), "views_missing": views_missing,
+            "views_with_null_embedding": views_with_null_embedding,
+            "complete": not views_missing and not views_with_null_embedding,
+        })
+
+    workstations = db.query(Workstation).filter_by(org_id=org_id).all()
+    workstation_readiness = []
+    for ws in workstations:
+        active_assignment = (
+            db.query(WorkstationAssignment)
+            .filter_by(org_id=org_id, cam_id=ws.cam_id, workstation_name=ws.name, effective_to=None)
+            .order_by(WorkstationAssignment.effective_from.desc()).first()
+        )
+        workstation_readiness.append({
+            "cam_id": ws.cam_id, "name": ws.name,
+            "assigned_employee_id": active_assignment.employee_id if active_assignment else None,
+            "has_active_assignment": active_assignment is not None,
+        })
+
+    return {
+        "org_id": org_id,
+        "employees": employee_readiness,
+        "employees_complete_count": sum(1 for e in employee_readiness if e["complete"]),
+        "employees_total_count": len(employee_readiness),
+        "workstations": workstation_readiness,
+        "workstations_unassigned_count": sum(1 for w in workstation_readiness if not w["has_active_assignment"]),
+        "note": "calibration/training status intentionally not reported here -- "
+                "see this endpoint's docstring, near_k/near_sigma0 are not "
+                "currently used by live detection regardless of training status.",
     }
 
 

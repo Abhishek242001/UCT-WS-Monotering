@@ -271,3 +271,53 @@ def test_system_health_reports_real_capabilities(client, auth_headers):
     # This project's own dependency (yolo_detector) must load successfully
     # for these tests to have gotten this far at all.
     assert body["yolo_model_loadable"] is True
+
+
+def test_readiness_flags_incomplete_enrollment_and_unassigned_workstation(client, auth_headers):
+    """Real, deliberately mixed fixture: one fully-enrolled employee, one
+    incomplete employee (missing views AND a null embedding on a
+    present view), one assigned workstation, one unassigned one --
+    verifies the readiness endpoint catches all four conditions
+    correctly, not just that it returns 200."""
+    from app.database import SessionLocal
+    from app.models import Employee, EmployeeFaceGallery, Workstation, WorkstationAssignment
+
+    db = SessionLocal()
+    try:
+        db.add(Employee(employee_id="EMP-READY-1", org_id=1, name="Complete Person"))
+        for v in ("front", "left", "right", "top"):
+            row = EmployeeFaceGallery(employee_id="EMP-READY-1", view=v)
+            row.set_embedding([0.1] * 512)
+            db.add(row)
+
+        db.add(Employee(employee_id="EMP-READY-2", org_id=1, name="Incomplete Person"))
+        db.add(EmployeeFaceGallery(employee_id="EMP-READY-2", view="front", embedding=None))
+        row2 = EmployeeFaceGallery(employee_id="EMP-READY-2", view="left")
+        row2.set_embedding([0.2] * 512)
+        db.add(row2)
+
+        db.add(Workstation(org_id=1, cam_id=313131, name="ReadyDeskA", x1=0, y1=0, x2=1, y2=1))
+        db.add(Workstation(org_id=1, cam_id=313131, name="ReadyDeskB", x1=0, y1=0, x2=1, y2=1))
+        db.add(WorkstationAssignment(org_id=1, cam_id=313131, workstation_name="ReadyDeskA",
+                                      employee_id="EMP-READY-1", effective_from="2026-01-01"))
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get("/reports/face-recognition-readiness?org_id=1", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    by_id = {e["employee_id"]: e for e in body["employees"]}
+    assert by_id["EMP-READY-1"]["complete"] is True
+    assert by_id["EMP-READY-1"]["views_missing"] == []
+
+    assert by_id["EMP-READY-2"]["complete"] is False
+    assert set(by_id["EMP-READY-2"]["views_missing"]) == {"right", "top"}
+    assert by_id["EMP-READY-2"]["views_with_null_embedding"] == ["front"]
+
+    by_name = {w["name"]: w for w in body["workstations"] if w["cam_id"] == 313131}
+    assert by_name["ReadyDeskA"]["has_active_assignment"] is True
+    assert by_name["ReadyDeskA"]["assigned_employee_id"] == "EMP-READY-1"
+    assert by_name["ReadyDeskB"]["has_active_assignment"] is False
+    assert by_name["ReadyDeskB"]["assigned_employee_id"] is None

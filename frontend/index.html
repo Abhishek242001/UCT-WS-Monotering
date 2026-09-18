@@ -252,6 +252,25 @@
         </table>
         <button class="secondary" onclick="loadEmployees()">Refresh</button>
       </div>
+
+      <div class="card">
+        <h2>Face recognition readiness check</h2>
+        <p class="hint">Checks whether every active employee has all 4 views enrolled with a real embedding (not just a row that failed silently), and whether every saved workstation actually has someone assigned to it — an unassigned workstation can show a correct detection as MISMATCH, not something more obvious.</p>
+        <button class="primary" onclick="runReadinessCheck()">Run readiness check</button>
+        <div id="readinessMsg" class="hint"></div>
+        <div id="readinessResults" style="display:none; margin-top:10px">
+          <h3 style="font-size:13px; color:var(--slate); margin:14px 0 6px">Employees</h3>
+          <table>
+            <thead><tr><th>Employee</th><th>Views enrolled</th><th>Missing</th><th>Null embedding</th><th>Ready</th></tr></thead>
+            <tbody id="readinessEmployeesTable"></tbody>
+          </table>
+          <h3 style="font-size:13px; color:var(--slate); margin:14px 0 6px">Workstations</h3>
+          <table>
+            <thead><tr><th>Camera</th><th>Workstation</th><th>Assigned to</th></tr></thead>
+            <tbody id="readinessWorkstationsTable"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- TRY DETECTION -->
@@ -715,6 +734,34 @@ async function loadEmployees() {
       `<tr><td>${escapeHtml(e.employee_id)}</td><td>${escapeHtml(e.name)}</td><td>${escapeHtml(e.department)||'—'}</td><td>${e.active?'yes':'no'}</td></tr>`
     ).join('') || '<tr><td colspan="4">None yet.</td></tr>';
   } catch (e) { console.error(e); }
+}
+
+async function runReadinessCheck() {
+  const msgEl = document.getElementById('readinessMsg');
+  const resultsEl = document.getElementById('readinessResults');
+  msgEl.textContent = 'Checking…';
+  resultsEl.style.display = 'none';
+  let body;
+  try {
+    body = await api(`/reports/face-recognition-readiness?org_id=${getOrgId()}`);
+  } catch (e) { msgEl.textContent = 'Failed: ' + e.message; return; }
+
+  msgEl.textContent = `${body.employees_complete_count} / ${body.employees_total_count} employees fully enrolled · ${body.workstations_unassigned_count} workstation(s) unassigned`;
+
+  document.getElementById('readinessEmployeesTable').innerHTML = body.employees.map(e => `<tr>
+    <td>${escapeHtml(e.employee_id)} (${escapeHtml(e.name)})</td>
+    <td>${e.views_enrolled.map(escapeHtml).join(', ') || '—'}</td>
+    <td>${e.views_missing.map(escapeHtml).join(', ') || '—'}</td>
+    <td>${e.views_with_null_embedding.map(escapeHtml).join(', ') || '—'}</td>
+    <td><span class="badge ${e.complete ? 'MATCH' : 'MISMATCH'}">${e.complete ? 'ready' : 'incomplete'}</span></td>
+  </tr>`).join('') || '<tr><td colspan="5">No active employees.</td></tr>';
+
+  document.getElementById('readinessWorkstationsTable').innerHTML = body.workstations.map(w => `<tr>
+    <td>${w.cam_id}</td><td>${escapeHtml(w.name)}</td>
+    <td>${w.has_active_assignment ? escapeHtml(w.assigned_employee_id) : '<span class="badge MISMATCH">unassigned</span>'}</td>
+  </tr>`).join('') || '<tr><td colspan="3">No workstations saved.</td></tr>';
+
+  resultsEl.style.display = 'block';
 }
 
 // --- bulk zip enrollment ---
