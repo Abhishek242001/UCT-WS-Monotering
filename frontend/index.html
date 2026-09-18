@@ -556,6 +556,7 @@ async function loadIdentityStatus() {
 
 // --- workstations / ROI drawing ---
 let roiImg = null, roiStart = null, roiRect = null;
+let savedRoiBoxes = [];  // {name, x, y, w, h} in canvas-pixel space, accumulated for the currently loaded image
 function loadRoiImage(evt) {
   const file = evt.target.files[0];
   const reader = new FileReader();
@@ -563,6 +564,8 @@ function loadRoiImage(evt) {
     roiImg = new Image();
     roiImg.onload = () => drawRoiCanvas();
     roiImg.src = e.target.result;
+    savedRoiBoxes = [];
+    roiRect = null;
   };
   reader.readAsDataURL(file);
 }
@@ -571,6 +574,15 @@ function drawRoiCanvas() {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0,0,canvas.width,canvas.height);
   if (roiImg) ctx.drawImage(roiImg, 0, 0, canvas.width, canvas.height);
+  ctx.font = '13px sans-serif';
+  for (const b of savedRoiBoxes) {
+    ctx.strokeStyle = '#1E9E57'; ctx.lineWidth = 2;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = '#1E9E57';
+    ctx.fillRect(b.x, Math.max(0, b.y - 18), ctx.measureText(b.name).width + 8, 18);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(b.name, b.x + 4, Math.max(13, b.y - 5));
+  }
   if (roiRect) {
     ctx.strokeStyle = '#5D5FEF'; ctx.lineWidth = 2;
     ctx.strokeRect(roiRect.x, roiRect.y, roiRect.w, roiRect.h);
@@ -607,7 +619,13 @@ async function saveWorkstation() {
     await api('/workstations/save', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
       org_id, cam_id, workstations: [{ name, x1:+canvas.dataset.x1, y1:+canvas.dataset.y1, x2:+canvas.dataset.x2, y2:+canvas.dataset.y2 }]
     })});
-    showMsg('roiMsg', `Saved workstation "${name}".`);
+    showMsg('roiMsg', `Saved workstation "${name}". Draw the next box on this same photo, or upload a new one.`);
+    savedRoiBoxes.push({ name, x: roiRect.x, y: roiRect.y, w: roiRect.w, h: roiRect.h });
+    roiRect = null;
+    document.getElementById('roiName').value = '';
+    delete canvas.dataset.x1; delete canvas.dataset.y1; delete canvas.dataset.x2; delete canvas.dataset.y2;
+    document.getElementById('roiCoordsPreview').textContent = '';
+    drawRoiCanvas();
     loadWorkstations();
   } catch (e) { showMsg('roiMsg', e.message, false); }
 }
