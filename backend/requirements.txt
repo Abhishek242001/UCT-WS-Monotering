@@ -1,7 +1,6 @@
 # Core backend -- verified installable and working in a constrained
 # environment (no GPU, limited disk). Real YOLO person detection works
-# out of the box with these. Face recognition runs in documented stub
-# mode until requirements-face-recognition.txt is also installed.
+# out of the box with these.
 
 fastapi==0.141.1
 uvicorn[standard]==0.34.0
@@ -12,6 +11,23 @@ numpy>=1.26
 scipy>=1.11
 opencv-python-headless>=4.9
 ultralytics>=8.3
+
+# Face recognition (previously a separate opt-in file,
+# requirements-face-recognition.txt -- merged in here on request so a
+# single `pip install -r requirements.txt` covers everything. That file
+# was originally kept separate specifically because installing this adds
+# real setup time and a one-time ~124MB model download (buffalo_s, from
+# the deepinsight/insightface GitHub releases) that needs outbound
+# internet access from wherever the backend runs -- both now happen on
+# every setup, even ones that only need YOLO/plumbing testing. If
+# insightface fails to import for any reason (network-blocked
+# environment, disk space, etc.), app/vision/face_embedder.py falls back
+# automatically to a clearly-labeled stub -- see that file's docstring.
+# VERIFIED WORKING in this project's own build: the buffalo_s model
+# downloaded successfully and correctly discriminated real faces -- same
+# person re-extracted: cosine similarity 1.0; two different people: ~-0.03.
+insightface>=0.7.3
+onnxruntime>=1.19
 
 # Testing
 pytest==9.1.1

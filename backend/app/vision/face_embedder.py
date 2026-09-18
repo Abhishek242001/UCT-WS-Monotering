@@ -20,16 +20,20 @@ photos of the SAME person will NOT reliably produce similar stub
 embeddings. Stub mode exists to test plumbing, not accuracy.
 """
 import hashlib
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 EMBEDDING_DIM = 512  # matches ArcFace/AdaFace output dimensionality
 
 _insightface_app = None
 _insightface_available = None
+_insightface_load_error = None  # str | None -- the real exception from the last load attempt, if it failed
 
 
 def _try_load_insightface():
-    global _insightface_app, _insightface_available
+    global _insightface_app, _insightface_available, _insightface_load_error
     if _insightface_available is not None:
         return _insightface_available
     try:
@@ -38,9 +42,32 @@ def _try_load_insightface():
         _insightface_app = FaceAnalysis(name=os.environ.get("INSIGHTFACE_PACK", "buffalo_s"), providers=providers)
         _insightface_app.prepare(ctx_id=-1, det_size=(320, 320))
         _insightface_available = True
-    except Exception:
+        _insightface_load_error = None
+    except Exception as e:
+        # Previously this swallowed the exception completely -- package
+        # missing, model download blocked by a firewall, disk full,
+        # ONNX provider mismatch, anything -- with zero record of WHY,
+        # anywhere, ever. That made "still stub after installing the
+        # packages" undiagnosable from outside a live debugger. Now
+        # logged AND captured for /system/health to report (see
+        # load_error() below), and cached only for this process's
+        # lifetime like before -- a fixed underlying cause (e.g. network
+        # restored) still needs a backend restart to take effect, same
+        # as always, but at least the reason is now visible.
         _insightface_available = False
+        _insightface_load_error = f"{type(e).__name__}: {e}"
+        logger.warning("Real face-recognition backend (insightface) failed to load -- "
+                        "falling back to stub. Reason: %s", _insightface_load_error, exc_info=True)
     return _insightface_available
+
+
+def load_error() -> str | None:
+    """The real exception from the last insightface load attempt, if it
+    fell back to stub for a reason other than the package simply not
+    being installed. None if insightface loaded successfully, or if it
+    hasn't been attempted yet in this process."""
+    _try_load_insightface()  # ensure at least one attempt has been made
+    return _insightface_load_error
 
 
 def backend_name() -> str:

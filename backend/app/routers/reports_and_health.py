@@ -96,6 +96,7 @@ def system_health(org_id: int, db: Session = Depends(get_db), admin: AdminSessio
         "pipeline_status": "HEALTHY" if (yolo_loadable and opencv_ffmpeg_support) else "DEGRADED",
         "face_recognition_backend": face_embedder.backend_name(),
         "face_recognition_is_stub": face_embedder.backend_name() == "stub",
+        "face_recognition_load_error": face_embedder.load_error(),
         "yolo_model_loadable": yolo_loadable,
         "yolo_load_error": yolo_error,
         "opencv_ffmpeg_support": opencv_ffmpeg_support,
