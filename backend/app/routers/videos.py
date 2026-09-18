@@ -16,6 +16,7 @@ during the multipart upload itself. Nothing special is needed here beyond
 accepting the upload normally.
 """
 import hashlib
+import json
 import os
 import uuid
 
@@ -39,7 +40,56 @@ def _video_dir() -> str:
 MAX_VIDEO_BYTES = int(os.environ.get("MAX_VIDEO_UPLOAD_BYTES", 500 * 1024 * 1024))  # 500MB
 DEMO_WORKSTATION_NAME = "Demo-Desk"
 
-_videos: dict[str, dict] = {}  # video_id -> {filename, path, size_bytes}
+_videos: dict[str, dict] = {}  # video_id -> {filename, path, size_bytes, org_id, file_hash}
+
+
+def _meta_path(video_path: str) -> str:
+    return video_path + ".meta.json"
+
+
+def _save_video_meta(video_id: str, meta: dict) -> None:
+    """Writes a JSON sidecar next to the video file so _videos survives a
+    backend restart -- previously _videos was purely in-memory, so every
+    restart silently orphaned every already-uploaded video: find_by_hash
+    could never match them again (making re-uploads look "new" instead of
+    being flagged as duplicates), and /videos/{id}/analyze|clip|annotate
+    all 404'd on any video_id from before the restart, even though the
+    actual file was still sitting on disk the whole time."""
+    with open(_meta_path(meta["path"]), "w") as f:
+        json.dump({"video_id": video_id, **meta}, f)
+
+
+def _load_videos_from_disk() -> None:
+    """Runs once at process start (module import time -- FastAPI routers
+    are imported exactly once per process). Rebuilds _videos from the
+    *.meta.json sidecars written by _save_video_meta, so videos uploaded
+    in a previous process run are usable again: find_by_hash matches
+    them, and their video_id keeps working for analyze/clip/annotate.
+    Sidecar-less video files (from before this fix, or a sidecar that
+    failed to write) are simply not recovered -- their bytes remain on
+    disk but are orphaned, same as before this fix; nothing here deletes
+    or modifies them."""
+    video_dir = _video_dir()
+    if not os.path.isdir(video_dir):
+        return
+    loaded = 0
+    for name in os.listdir(video_dir):
+        if not name.endswith(".meta.json"):
+            continue
+        try:
+            with open(os.path.join(video_dir, name)) as f:
+                data = json.load(f)
+            video_id = data.pop("video_id")
+            if os.path.exists(data.get("path", "")):
+                _videos[video_id] = data
+                loaded += 1
+        except (json.JSONDecodeError, KeyError, OSError):
+            continue  # a corrupt/partial sidecar -- skip it, don't crash startup
+    if loaded:
+        print(f"[videos] Recovered {loaded} video(s) from disk metadata after restart.")
+
+
+_load_videos_from_disk()
 
 
 def _default_cam_id_for(video_id: str) -> int:
@@ -84,6 +134,7 @@ async def upload_video(org_id: int = Form(...), file: UploadFile = File(...), ad
 
     _videos[video_id] = {"filename": file.filename, "path": dest_path, "size_bytes": size,
                           "org_id": org_id, "file_hash": file_hash}
+    _save_video_meta(video_id, _videos[video_id])
     return {"video_id": video_id, "filename": file.filename, "size_bytes": size, "status": "uploaded", "file_hash": file_hash}
 
 
