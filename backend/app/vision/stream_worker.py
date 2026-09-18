@@ -162,26 +162,36 @@ class StreamWorker(threading.Thread):
 
         try:
             people = yolo_detector.detect_people(tmp_path)
+            now = time.monotonic()
 
             for name, roi in rois.items():
                 occupied = any(yolo_detector.boxes_overlap(p, roi) for p in people)
                 new_status = "ACTIVE" if occupied else "VACANT"
-                previous_status = self._last_occupancy.get(name, "VACANT")
+                previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
                 self._last_occupancy[name] = new_status
                 assigned = self._assigned_employee(db, name)
 
+                status_changed = previous_status != new_status  # True on the first frame too
+                heartbeat_due = (now - self._last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
+
                 if not occupied:
-                    self._write_event(db, name, "VACANT", assigned, None, None, None)
+                    # Previously wrote+published a VACANT event on EVERY
+                    # not-occupied frame, with no de-duplication -- for a
+                    # multi-minute video at poll_interval_seconds=0 this
+                    # floods both the DB and the WebSocket with thousands
+                    # of identical lines, which is what made the frontend
+                    # event log look frozen/unresponsive. Now debounced
+                    # exactly like the ACTIVE/identify path below: only on
+                    # a real transition, or the same slow heartbeat.
+                    if status_changed or heartbeat_due:
+                        self._last_identify_time[name] = now
+                        self._write_event(db, name, "VACANT", assigned, None, None, None)
                     continue
 
                 # Event-driven identification trigger (Section 3.2): fire
                 # on a VACANT -> ACTIVE transition, or on a slow heartbeat
                 # thereafter -- never on every frame.
-                now = time.monotonic()
-                became_active = previous_status == "VACANT" and new_status == "ACTIVE"
-                heartbeat_due = (now - self._last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
-
-                if became_active or heartbeat_due:
+                if status_changed or heartbeat_due:
                     self._last_identify_time[name] = now
                     event_type, detected, similarity, snr = self._identify(db, tmp_path, assigned)
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)

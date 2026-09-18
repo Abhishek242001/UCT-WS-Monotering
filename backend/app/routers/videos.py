@@ -20,12 +20,14 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Workstation, AdminSession
 from app.routers.admin_auth import require_admin, verify_org_access
 from app.routers import streams as streams_router
+from app.vision import video_export
 import asyncio
 
 router = APIRouter(tags=["videos"])
@@ -168,3 +170,93 @@ async def analyze_video(
         "workstation_name": workstation_name,
         "defaults_used": {"org_id": org_id is None, "cam_id": cam_id is None, "user_id": user_id is None},
     }
+
+
+def _clips_dir() -> str:
+    return os.environ.get("VIDEO_CLIPS_DIR", "./video_clips")
+
+
+def _annotated_dir() -> str:
+    return os.environ.get("ANNOTATED_VIDEOS_DIR", "./annotated_videos")
+
+
+_annotated_videos: dict[str, dict] = {}  # annotated_id -> {path, org_id, source_video_id}
+
+
+@router.get("/videos/{video_id}/clip")
+def download_clip(video_id: str, seconds: int = 300, admin: AdminSession = Depends(require_admin)):
+    """Downloads the first `seconds` of the original uploaded video, no
+    detection/annotation -- for quickly reviewing raw footage without
+    pulling the full file. Default 300s = first 5 minutes, per the
+    original request. Cached: a repeat call with the same video_id+seconds
+    reuses the already-extracted file instead of re-cutting it."""
+    video = _videos.get(video_id)
+    if not video:
+        raise HTTPException(404, "Video not found -- upload it first via POST /videos/upload")
+    verify_org_access(admin, video["org_id"])
+    if seconds <= 0 or seconds > 3600:
+        raise HTTPException(422, "seconds must be between 1 and 3600")
+
+    os.makedirs(_clips_dir(), exist_ok=True)
+    dest_path = os.path.abspath(os.path.join(_clips_dir(), f"{video_id}_{seconds}s.mp4"))
+    if not os.path.exists(dest_path):
+        try:
+            video_export.extract_clip(video["path"], dest_path, seconds)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    base_name = os.path.splitext(video["filename"] or video_id)[0]
+    return FileResponse(dest_path, media_type="video/mp4", filename=f"{base_name}_first{seconds}s.mp4")
+
+
+@router.post("/videos/{video_id}/annotate", status_code=201)
+def create_annotated_video(
+    video_id: str,
+    org_id: int = Form(...),
+    cam_id: int = Form(...),
+    max_seconds: int = Form(60),
+    detect_every_n_frames: int = Form(3),
+    db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin),
+):
+    """Runs real YOLO detection + identity matching over up to max_seconds
+    of the uploaded video and renders the result (ROI boxes, detected
+    people, occupancy/identity status) onto a new downloadable video --
+    see app/vision/video_export.py for exactly what runs and why it's
+    capped and frame-skipped by default. This call is synchronous and
+    blocks until rendering finishes, so keep max_seconds modest; there is
+    no background job/progress reporting for this endpoint."""
+    video = _videos.get(video_id)
+    if not video:
+        raise HTTPException(404, "Video not found -- upload it first via POST /videos/upload")
+    verify_org_access(admin, video["org_id"])
+    verify_org_access(admin, org_id)  # org_id used for the ROI/gallery lookup may differ from the video's own org
+    if max_seconds <= 0 or max_seconds > 600:
+        raise HTTPException(422, "max_seconds must be between 1 and 600 (10 min) -- CPU-only YOLO "
+                                  "inference makes a longer synchronous run impractically slow")
+    if detect_every_n_frames < 1:
+        raise HTTPException(422, "detect_every_n_frames must be >= 1")
+
+    annotated_id = f"ANNOT-{uuid.uuid4().hex[:12]}"
+    os.makedirs(_annotated_dir(), exist_ok=True)
+    dest_path = os.path.abspath(os.path.join(_annotated_dir(), f"{annotated_id}.mp4"))
+    try:
+        result = video_export.annotate_video(
+            video["path"], dest_path, db, org_id, cam_id,
+            max_seconds=max_seconds, detect_every_n_frames=detect_every_n_frames,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+    _annotated_videos[annotated_id] = {"path": dest_path, "org_id": org_id, "source_video_id": video_id}
+    return {"annotated_id": annotated_id, "download_url": f"/videos/annotated/{annotated_id}/download", **result}
+
+
+@router.get("/videos/annotated/{annotated_id}/download")
+def download_annotated(annotated_id: str, admin: AdminSession = Depends(require_admin)):
+    row = _annotated_videos.get(annotated_id)
+    if not row:
+        raise HTTPException(404, "Annotated video not found -- it must be generated via POST "
+                                  "/videos/{video_id}/annotate first, and only exists in this "
+                                  "backend process's memory (lost on restart, same as uploaded videos)")
+    verify_org_access(admin, row["org_id"])
+    return FileResponse(row["path"], media_type="video/mp4", filename=f"{annotated_id}.mp4")

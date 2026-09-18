@@ -329,12 +329,32 @@
         </div>
       </div>
 
+      <div class="card" id="vaDownloadsCard" style="display:none">
+        <h2>Downloads</h2>
+
+        <p class="hint"><b>Raw clip</b> — just the first N seconds of your uploaded file, no detection. Fast, for reviewing footage.</p>
+        <div class="row">
+          <div><label>Seconds</label><input id="clipSeconds" value="300"></div>
+        </div>
+        <button class="secondary" onclick="downloadClip()">Download clip</button>
+        <div id="clipMsg" class="hint"></div>
+
+        <p class="hint" style="margin-top:18px"><b>Annotated video</b> — runs real detection and draws ROI boxes, detected people, and occupancy/identity status onto the video. CPU-only YOLO inference is slow (see hint below), so this is capped and blocks until done — don't navigate away while it runs.</p>
+        <div class="row">
+          <div><label>Seconds to process (max 600)</label><input id="annotateSeconds" value="60"></div>
+          <div><label>Run detection every N frames</label><input id="annotateEveryN" value="3"></div>
+        </div>
+        <button class="secondary" onclick="downloadAnnotated()">Generate + download annotated video</button>
+        <div id="annotateMsg" class="hint"></div>
+      </div>
+
       <div class="card" id="analysisResultsCard" style="display:none">
         <h2>Live analysis results</h2>
         <div id="analysisStatusMsg" class="hint"></div>
         <div class="progress-outer" id="analysisProgressWrap">
           <div class="progress-inner" id="analysisProgressBar"><span id="analysisProgressLabel">0%</span></div>
         </div>
+        <p class="hint">Showing the most recent <span id="analysisEventCap">300</span> events — older ones are dropped from view (not from the database) to keep the browser responsive on long videos.</p>
         <div class="event-log" id="analysisEventLog"></div>
       </div>
     </section>
@@ -861,6 +881,7 @@ async function onVideoFileSelected(evt) {
   document.getElementById('analysisDefaults').style.display = 'none';
   document.getElementById('runAnalysisBtn').style.display = 'none';
   document.getElementById('analysisResultsCard').style.display = 'none';
+  document.getElementById('vaDownloadsCard').style.display = 'none';
   document.getElementById('uploadMsg').innerHTML = '';
   document.getElementById('duplicateFoundCard').style.display = 'none';
 
@@ -901,6 +922,7 @@ function useExistingVideo() {
   showMsg('uploadMsg', `Selected existing video "${card.dataset.filename}". Ready to analyze — no re-upload needed.`);
   document.getElementById('analysisDefaults').style.display = 'block';
   document.getElementById('runAnalysisBtn').style.display = 'inline-block';
+  document.getElementById('vaDownloadsCard').style.display = 'block';
 }
 
 function dismissDuplicateAndUploadAnyway() {
@@ -940,6 +962,7 @@ function uploadVideoFile(file) {
       showMsg('uploadMsg', `Uploaded "${body.filename}" (${(body.size_bytes/1024/1024).toFixed(1)} MB). Ready to analyze.`);
       document.getElementById('analysisDefaults').style.display = 'block';
       document.getElementById('runAnalysisBtn').style.display = 'inline-block';
+      document.getElementById('vaDownloadsCard').style.display = 'block';
     } else {
       showMsg('uploadMsg', 'Upload failed: ' + xhr.responseText, false);
     }
@@ -1003,12 +1026,22 @@ async function runAiAnalysis() {
   // Same real-time push mechanism a live RTSP camera stream uses —
   // this is not a simulation, it's the identical WebSocket endpoint.
   const ws = new WebSocket(`${getBackendWsUrl()}/ws/streams/${body.stream_id}?token=${sessionToken}`);
+  const MAX_EVENT_LINES = 300;
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
-    if (msg.type === 'progress' && msg.total_frames) {
-      const pct = Math.round((msg.frames_processed / msg.total_frames) * 100);
-      document.getElementById('analysisProgressBar').style.width = pct + '%';
-      document.getElementById('analysisProgressLabel').textContent = pct + '%';
+    if (msg.type === 'progress') {
+      if (msg.total_frames) {
+        const pct = Math.round((msg.frames_processed / msg.total_frames) * 100);
+        document.getElementById('analysisProgressBar').style.width = pct + '%';
+        document.getElementById('analysisProgressLabel').textContent = pct + '%';
+      } else {
+        // Total frame count wasn't available from this video's metadata
+        // (common for some CCTV export formats) -- show a count instead
+        // of leaving the bar frozen at 0%, which previously looked like
+        // analysis had silently stopped.
+        document.getElementById('analysisProgressBar').style.width = '100%';
+        document.getElementById('analysisProgressLabel').textContent = `${msg.frames_processed} frames processed`;
+      }
     } else if (msg.type === 'event') {
       const log = document.getElementById('analysisEventLog');
       const line = document.createElement('div');
@@ -1016,6 +1049,7 @@ async function runAiAnalysis() {
       line.innerHTML = `<span>Frame ${msg.frame_number} — ${escapeHtml(msg.workstation_name)}</span>
         <span class="badge ${msg.event_type}">${escapeHtml(msg.event_type)}</span>`;
       log.prepend(line);
+      while (log.children.length > MAX_EVENT_LINES) log.removeChild(log.lastChild);
     } else if (msg.type === 'completed') {
       document.getElementById('analysisStatusMsg').innerHTML += ' — <b>Analysis complete.</b>';
       document.getElementById('analysisProgressBar').style.width = '100%';
@@ -1027,6 +1061,61 @@ async function runAiAnalysis() {
     }
   };
   ws.onerror = () => { document.getElementById('analysisStatusMsg').innerHTML += ' — WebSocket error.'; };
+}
+
+async function downloadClip() {
+  if (!uploadedVideoId) return;
+  const seconds = document.getElementById('clipSeconds').value || 300;
+  const el = document.getElementById('clipMsg');
+  el.textContent = 'Preparing clip…';
+  try {
+    const resp = await fetch(`${API}/videos/${uploadedVideoId}/clip?seconds=${seconds}`, {
+      headers: { 'Authorization': 'Bearer ' + sessionToken }
+    });
+    if (!resp.ok) { el.textContent = 'Failed: ' + (await resp.text()); return; }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : `clip_${seconds}s.mp4`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    el.textContent = `Downloaded "${filename}".`;
+  } catch (e) { el.textContent = 'Failed: ' + e.message; }
+}
+
+async function downloadAnnotated() {
+  if (!uploadedVideoId) return;
+  const org_id = document.getElementById('vaOrgId').value || getOrgId();
+  const cam_id = document.getElementById('vaCamId').value;
+  const max_seconds = document.getElementById('annotateSeconds').value || 60;
+  const detect_every_n_frames = document.getElementById('annotateEveryN').value || 3;
+  const el = document.getElementById('annotateMsg');
+  if (!cam_id) { el.textContent = 'Enter a Camera ID above first — the annotated video needs a saved ROI to draw.'; return; }
+
+  el.textContent = 'Running detection and rendering — this blocks until done (see the processing-time hint above), please wait…';
+  const fd = new FormData();
+  fd.append('org_id', org_id); fd.append('cam_id', cam_id);
+  fd.append('max_seconds', max_seconds); fd.append('detect_every_n_frames', detect_every_n_frames);
+  let body;
+  try {
+    body = await api(`/videos/${uploadedVideoId}/annotate`, { method: 'POST', body: fd });
+  } catch (e) { el.textContent = 'Failed: ' + e.message; return; }
+
+  el.innerHTML = `Rendered ${body.frames_processed} frames (${body.seconds_processed}s of video) in ${body.processing_time_seconds}s server time. ` +
+    (body.playable_in_browser ? '' : '<b>Note: this server has no ffmpeg for H.264 re-encoding, so the file downloads but likely won\'t preview inline in your browser — open it in VLC or similar.</b> ') +
+    'Downloading…';
+  try {
+    const resp = await fetch(`${API}${body.download_url}`, { headers: { 'Authorization': 'Bearer ' + sessionToken } });
+    if (!resp.ok) { el.textContent = 'Rendered, but download failed: ' + (await resp.text()); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${body.annotated_id}.mp4`; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    el.textContent += ' Done.';
+  } catch (e) { el.textContent = 'Rendered, but download failed: ' + e.message; }
 }
 </script>
 </body>
