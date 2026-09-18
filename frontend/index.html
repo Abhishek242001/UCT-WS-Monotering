@@ -330,7 +330,26 @@
       </div>
 
       <div class="card" id="vaDownloadsCard" style="display:none">
-        <h2>Downloads</h2>
+        <h2>Diagnostics</h2>
+        <p class="hint"><b>Run this first</b> — samples a few frames spread across the whole video (not just the start), runs real detection on each, and reports what YOLO actually found plus how long a full annotated render would take on this server. Takes seconds, not minutes.</p>
+        <div class="row">
+          <div><label>Samples</label><input id="diagSamples" value="8"></div>
+        </div>
+        <button class="secondary" onclick="runDiagnostics()">Run diagnostics</button>
+        <div id="diagMsg" class="hint"></div>
+        <div id="diagResults" style="display:none; margin-top:10px">
+          <table>
+            <tr><td>Frames sampled</td><td id="diagFramesSampled"></td></tr>
+            <tr><td>Video</td><td id="diagVideoInfo"></td></tr>
+            <tr><td>Frames with ≥1 person detected</td><td id="diagFramesWithPerson"></td></tr>
+            <tr><td>Detection confidence (min / mean / max)</td><td id="diagConfidence"></td></tr>
+            <tr><td>Occupancy hits by workstation</td><td id="diagOccupancy"></td></tr>
+            <tr><td>Measured YOLO time per call (this server)</td><td id="diagYoloTime"></td></tr>
+            <tr><td>Estimated full annotate time</td><td id="diagEstimate"></td></tr>
+          </table>
+        </div>
+
+        <h2 style="margin-top:22px">Downloads</h2>
 
         <p class="hint"><b>Raw clip</b> — just the first N seconds of your uploaded file, no detection. Fast, for reviewing footage.</p>
         <div class="row">
@@ -339,7 +358,7 @@
         <button class="secondary" onclick="downloadClip()">Download clip</button>
         <div id="clipMsg" class="hint"></div>
 
-        <p class="hint" style="margin-top:18px"><b>Annotated video</b> — runs real detection and draws ROI boxes, detected people, and occupancy/identity status onto the video. CPU-only YOLO inference is slow (see hint below), so this is capped and blocks until done — don't navigate away while it runs.</p>
+        <p class="hint" style="margin-top:18px"><b>Annotated video</b> — runs real detection and draws ROI boxes, detected people, and occupancy/identity status onto the video. CPU-only YOLO inference is slow (see the diagnostics estimate above), so this is capped and blocks until done — don't navigate away while it runs.</p>
         <div class="row">
           <div><label>Seconds to process (max 600)</label><input id="annotateSeconds" value="60"></div>
           <div><label>Run detection every N frames</label><input id="annotateEveryN" value="3"></div>
@@ -1061,6 +1080,39 @@ async function runAiAnalysis() {
     }
   };
   ws.onerror = () => { document.getElementById('analysisStatusMsg').innerHTML += ' — WebSocket error.'; };
+}
+
+async function runDiagnostics() {
+  if (!uploadedVideoId) return;
+  const org_id = document.getElementById('vaOrgId').value || getOrgId();
+  const cam_id = document.getElementById('vaCamId').value;
+  const num_samples = document.getElementById('diagSamples').value || 8;
+  const msgEl = document.getElementById('diagMsg');
+  const resultsEl = document.getElementById('diagResults');
+  if (!cam_id) { msgEl.textContent = 'Enter a Camera ID above first — diagnostics needs a saved ROI to check against.'; return; }
+
+  msgEl.textContent = 'Sampling frames and running real detection — a few seconds…';
+  resultsEl.style.display = 'none';
+  let body;
+  try {
+    body = await api(`/videos/${uploadedVideoId}/diagnostics?org_id=${org_id}&cam_id=${cam_id}&num_samples=${num_samples}`);
+  } catch (e) { msgEl.textContent = 'Failed: ' + e.message; return; }
+
+  msgEl.textContent = '';
+  document.getElementById('diagFramesSampled').textContent = body.frames_sampled;
+  document.getElementById('diagVideoInfo').textContent =
+    `${body.video_duration_seconds ?? '?'}s, ${body.video_fps}fps, ${body.video_total_frames ?? 'unknown'} total frames`;
+  document.getElementById('diagFramesWithPerson').textContent = `${body.frames_with_at_least_one_person} / ${body.frames_sampled}`;
+  document.getElementById('diagConfidence').textContent =
+    body.confidence_mean === null ? 'no detections in sampled frames'
+    : `${body.confidence_min} / ${body.confidence_mean} / ${body.confidence_max}`;
+  document.getElementById('diagOccupancy').textContent =
+    Object.entries(body.occupancy_hits_by_workstation).map(([n, c]) => `${escapeHtml(n)}: ${c}/${body.frames_sampled}`).join(', ');
+  document.getElementById('diagYoloTime').textContent = `${body.measured_yolo_seconds_per_call}s/call`;
+  document.getElementById('diagEstimate').textContent =
+    body.extrapolated_full_annotate_seconds_at_detect_every_3_frames === null ? '—'
+    : `~${body.extrapolated_full_annotate_seconds_at_detect_every_3_frames}s for the full video at detect_every_n_frames=3`;
+  resultsEl.style.display = 'block';
 }
 
 async function downloadClip() {

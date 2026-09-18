@@ -54,6 +54,128 @@ def _ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def sample_diagnostics(source_path: str, db, org_id: int, cam_id: int, num_samples: int = 8) -> dict:
+    """Fast diagnostic pass: spreads num_samples frames evenly across the
+    ENTIRE video (not just the start, unlike annotate_video), runs real
+    YOLO detection on each, and reports what it actually found -- person
+    counts, confidence scores, and whether any detection overlapped the
+    saved ROI -- plus the real per-call YOLO latency measured on THIS
+    server. Exists specifically to answer two questions cheaply (seconds,
+    not minutes) before committing to a full annotate_video render:
+      1. Is YOLO detecting people in this footage at all, and at what
+         confidence -- distinguishes "ROI/threshold problem" from
+         "genuinely no one in frame" without needing to watch a rendered
+         video.
+      2. How long would a full annotate_video call actually take on this
+         specific server's hardware -- the measured per-call latency
+         here is a direct, real extrapolation basis, not a guess ported
+         from a different machine.
+    Raises ValueError if there's no saved ROI (same requirement as
+    annotate_video) or the source can't be opened.
+    """
+    rois = _load_rois(db, org_id, cam_id)
+    if not rois:
+        raise ValueError(
+            f"No saved workstation ROI for org_id={org_id}, cam_id={cam_id} -- "
+            "draw one on the Workstations tab first, or check the camera/org ID."
+        )
+    if num_samples < 1:
+        raise ValueError("num_samples must be >= 1")
+
+    cap = cv2.VideoCapture(source_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open source video: {source_path}")
+
+    # Force the model to load/download BEFORE timing starts -- otherwise
+    # the first sample's latency includes a one-time cost (confirmed
+    # ~40s on a cold start in this project's own testing) that has
+    # nothing to do with per-frame inference speed and badly skews the
+    # average this function exists to report.
+    yolo_detector.get_model()
+
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_seconds = round(total_frames / fps, 1) if (fps and total_frames) else None
+
+        if total_frames > 0:
+            sample_indices = sorted(set(
+                int(i * (total_frames - 1) / max(1, num_samples - 1)) for i in range(num_samples)
+            ))
+        else:
+            # Frame count unavailable (same metadata gap noted in
+            # runAiAnalysis's progress-bar handling) -- fall back to
+            # reading sequentially and sampling every Kth frame.
+            sample_indices = None
+
+        per_call_seconds: list[float] = []
+        confidences: list[float] = []
+        frames_with_person = 0
+        frames_with_occupancy: dict[str, int] = {name: 0 for name in rois}
+        frames_sampled = 0
+
+        def _sample_one(frame) -> None:
+            nonlocal frames_with_person, frames_sampled
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                cv2.imwrite(tmp.name, frame)
+                tmp_path = tmp.name
+            try:
+                t0 = time.monotonic()
+                people = yolo_detector.detect_people(tmp_path)
+                per_call_seconds.append(time.monotonic() - t0)
+                frames_sampled += 1
+                if people:
+                    frames_with_person += 1
+                    confidences.extend(p.confidence for p in people)
+                for name, roi in rois.items():
+                    if any(yolo_detector.boxes_overlap(p, roi) for p in people):
+                        frames_with_occupancy[name] += 1
+            finally:
+                os.unlink(tmp_path)
+
+        if sample_indices is not None:
+            for idx in sample_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, frame = cap.read()
+                if ok:
+                    _sample_one(frame)
+        else:
+            stride = 30  # arbitrary fallback spacing when total_frames is unknown
+            i = 0
+            while frames_sampled < num_samples:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if i % stride == 0:
+                    _sample_one(frame)
+                i += 1
+    finally:
+        cap.release()
+
+    avg_call_seconds = round(sum(per_call_seconds) / len(per_call_seconds), 3) if per_call_seconds else None
+    extrapolated = None
+    if avg_call_seconds and duration_seconds:
+        # Matches annotate_video's own detect_every_n_frames=3 default --
+        # if the caller plans a different value, they should scale this.
+        default_detect_every_n = 3
+        calls_for_full_video = (duration_seconds * fps) / default_detect_every_n
+        extrapolated = round(calls_for_full_video * avg_call_seconds, 1)
+
+    return {
+        "frames_sampled": frames_sampled,
+        "video_total_frames": total_frames or None,
+        "video_duration_seconds": duration_seconds,
+        "video_fps": round(fps, 2),
+        "frames_with_at_least_one_person": frames_with_person,
+        "confidence_min": round(min(confidences), 3) if confidences else None,
+        "confidence_mean": round(sum(confidences) / len(confidences), 3) if confidences else None,
+        "confidence_max": round(max(confidences), 3) if confidences else None,
+        "occupancy_hits_by_workstation": frames_with_occupancy,
+        "measured_yolo_seconds_per_call": avg_call_seconds,
+        "extrapolated_full_annotate_seconds_at_detect_every_3_frames": extrapolated,
+    }
+
+
 def extract_clip(source_path: str, dest_path: str, max_seconds: int) -> dict:
     """Writes the first `max_seconds` of source_path to dest_path.
 

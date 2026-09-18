@@ -229,3 +229,124 @@ Three new endpoints:
   `POST /videos/{id}/annotate`) that this was judged lower priority, but
   it's the identical bug, left as-is. Same for disk cleanup — no
   automatic eviction of old clips/annotated files in either directory.
+
+---
+
+## Addendum (same day) — working through the Remaining Issues above
+
+### `backend/app/routers/reports_and_health.py` — `/system/health` now checks real capabilities
+Was previously hardcoded (`pipeline_status: "HEALTHY"` always, regardless
+of anything). Now actually probes:
+`yolo_model_loadable` (+ `yolo_load_error` if not), `opencv_ffmpeg_support`
+(checked via `cv2.getBuildInformation()`), `rtsp_capable` (same
+underlying dependency as `opencv_ffmpeg_support` — RTSP is demuxed
+through OpenCV's FFMPEG backend), `ffmpeg_cli_available` (`shutil.which`),
+`annotated_video_playable_in_browser` (same as `ffmpeg_cli_available` —
+this is what `video_export.py`'s re-encode step depends on),
+`mp4v_video_writer_available` (an actual `cv2.VideoWriter` open/close
+probe, not just an assumption), and `face_recognition_is_stub`.
+**Directly resolves** the "ffmpeg availability... unverified" item —
+`curl -H "Authorization: Bearer $TOKEN" "$BACKEND/system/health?org_id=1"`
+now tells you, for real, on your actual server. No frontend UI added
+for this yet (checked via `curl`/`/docs` only) — flagging as still open
+below.
+
+### `backend/app/routers/videos.py` + `video_export.py` — new diagnostics endpoint
+`GET /videos/{video_id}/diagnostics?org_id=&cam_id=&num_samples=8` and
+`video_export.sample_diagnostics()`. Samples `num_samples` frames spread
+across the **entire** video duration (not just the start, unlike
+`annotate_video`), runs real YOLO detection on each, and reports:
+frames with ≥1 person, confidence min/mean/max, occupancy hits per
+workstation, and the **measured** YOLO seconds-per-call on this specific
+server, extrapolated to a full-video runtime estimate. Runs in seconds,
+not minutes — meant to be run before committing to a full
+`annotate_video` render.
+
+**Directly addresses** both "root cause of VACANT... unconfirmed" (the
+confidence/occupancy numbers tell you immediately whether YOLO is
+detecting anyone at all, without waiting for a rendered video) and
+"real-world annotation runtime... unmeasured" (this measures actual
+per-call latency **on whichever server it runs on** — your Lightning
+box, your local RTSP machine tomorrow, wherever — not this sandbox's
+number).
+
+A real bug was caught and fixed while verifying this: the first
+sampled frame's timing included the one-time YOLO model
+download/load cost (~40s, per this session's earlier benchmark),
+which badly skewed the reported "per call" average (9.1s vs the true
+~0.24s once warm). Fixed by calling `yolo_detector.get_model()` once
+before the timed sampling loop starts. Caught by actually running the
+function against the real sample video twice, before/after the fix —
+not by code review alone.
+
+### `backend/app/routers/videos.py` — `_annotated_videos` now also survives a restart
+Same sidecar-persistence pattern applied to `_videos` earlier is now
+also applied to `_annotated_videos` (`_save_annotated_meta`,
+`_load_annotated_videos_from_disk`). **Directly resolves** the
+"Annotated video storage is in-memory only" item from the previous
+Remaining Issues list.
+
+### `backend/tests/test_video_pipeline.py` (new) — first automated test suite in this repo
+16 tests, real end-to-end (real `POST /admin/login`, real SQLite DB,
+the actual shipped `sample_data/demo-camera-feed.mp4`, real YOLO
+inference — nothing mocked). Covers: duplicate-hash detection,
+restart-persistence sidecars (both `_videos` and `_annotated_videos`),
+clip download (success + invalid-seconds + 404), diagnostics (success +
+missing-ROI + invalid-num_samples), annotate+download round-trip
+(success + missing-ROI + over-cap + invalid detect_every_n_frames +
+404), and the new system-health endpoint. **Directly resolves** the "No
+automated test coverage added" item.
+
+### `frontend/index.html` — Diagnostics card
+New card on the Video Analysis tab, above Downloads: "Run diagnostics"
+button calling the new endpoint, results table showing frame count,
+detection confidence, occupancy hits, measured YOLO time, and the
+runtime estimate — meant to be the first thing you run on tomorrow's
+RTSP footage before generating a full annotated video.
+
+## Verification (this addendum)
+
+1. `node --check` on extracted JS, `python3 -m py_compile` on all four
+   changed/new backend files — all clean.
+2. Full route table re-inspected after every change — no conflicts,
+   `/videos/{video_id}/diagnostics` registers correctly alongside the
+   other six `/videos/*` routes.
+3. `sample_diagnostics()` run twice against the real sample video
+   (before/after the warmup-skew fix) — confirmed the bug and the fix
+   with actual numbers (9.116s → 0.236s per call).
+4. `_annotated_videos` persistence verified with the same genuine
+   two-process test used for `_videos` earlier — process 1 writes,
+   a fresh interpreter (process 2) recovers it correctly.
+5. **`pytest tests/ -v` — 16/16 passed**, real run, output captured
+   above. Re-ran once more after the frontend/health changes to confirm
+   nothing regressed — still 16/16.
+6. All test-generated files (DB, uploaded/clip/annotated video
+   directories, `.pytest_cache`) removed before packaging.
+
+## Remaining Issues — updated status
+
+- ~~Root cause of VACANT throughout unconfirmed~~ — **tooling now
+  exists** (diagnostics endpoint) to answer this quickly against real
+  footage; the actual root cause for the user's specific CCTV video is
+  still unknown until they run it.
+- ~~ffmpeg availability unverified~~ — **now checkable** via
+  `/system/health`; not yet run against the actual Lightning/RTSP
+  deployment server.
+- ~~Real-world annotation runtime unmeasured~~ — **now measurable** via
+  the diagnostics endpoint on whichever server it's run on; still not
+  actually measured on the user's real hardware.
+- ~~No automated test coverage~~ — **added**, 16 tests, all passing.
+- ~~`_annotated_videos` in-memory only~~ — **fixed**, same pattern as
+  `_videos`.
+- **`face_backend=stub` still active** — genuinely not addressed;
+  requires installing `requirements-face-recognition.txt` on the
+  deployment server, which this session cannot do remotely.
+- **`/system/health` has no frontend UI** — checked via `curl`/`/docs`
+  only in this session's own verification. Worth adding a small card if
+  this becomes a routine pre-flight check.
+- **Diagnostics' `extrapolated_full_annotate_seconds` assumes
+  `detect_every_n_frames=3`** (hardcoded in the extrapolation formula,
+  documented in the key name itself) — if the user runs
+  `annotate_video` with a different value, the estimate won't match;
+  not parameterized to keep the diagnostics endpoint's own signature
+  simple.

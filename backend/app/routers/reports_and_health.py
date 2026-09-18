@@ -1,3 +1,4 @@
+import os
 import uuid
 from collections import defaultdict
 
@@ -52,9 +53,58 @@ def mismatches(org_id: int, cam_id: int, date: str, db: Session = Depends(get_db
 
 @router.get("/system/health")
 def system_health(org_id: int, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """Previously returned a hardcoded pipeline_status: HEALTHY with no
+    real checks behind it. Now actually probes the things that silently
+    determine whether video/RTSP features will work on THIS server --
+    each of these differs by deployment (confirmed different between this
+    project's dev sandbox and prior findings), so guessing from another
+    environment isn't reliable; this endpoint lets you check the actual
+    server instead."""
     verify_org_access(admin, org_id)
     from app.vision import face_embedder
-    return {"cameras": [], "pipeline_status": "HEALTHY", "face_recognition_backend": face_embedder.backend_name()}
+
+    import shutil
+    ffmpeg_available = shutil.which("ffmpeg") is not None
+
+    import cv2
+    build_info = cv2.getBuildInformation()
+    opencv_ffmpeg_support = "FFMPEG:                      YES" in build_info
+    # RTSP itself is demuxed by OpenCV's FFMPEG backend (see
+    # stream_worker.py's module docstring) -- if this is NO, RTSP camera
+    # sources will fail to open regardless of anything else being correct.
+
+    mp4v_writer_ok = False
+    try:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        test_writer = cv2.VideoWriter("/tmp/_health_check_mp4v.mp4", fourcc, 20.0, (64, 64))
+        mp4v_writer_ok = test_writer.isOpened()
+        test_writer.release()
+        os.remove("/tmp/_health_check_mp4v.mp4") if os.path.exists("/tmp/_health_check_mp4v.mp4") else None
+    except Exception:
+        pass
+
+    yolo_loadable = True
+    yolo_error = None
+    try:
+        from app.vision import yolo_detector
+        yolo_detector.get_model()  # cached after first call -- cheap on repeat health checks
+    except Exception as e:
+        yolo_loadable = False
+        yolo_error = str(e)
+
+    return {
+        "pipeline_status": "HEALTHY" if (yolo_loadable and opencv_ffmpeg_support) else "DEGRADED",
+        "face_recognition_backend": face_embedder.backend_name(),
+        "face_recognition_is_stub": face_embedder.backend_name() == "stub",
+        "yolo_model_loadable": yolo_loadable,
+        "yolo_load_error": yolo_error,
+        "opencv_ffmpeg_support": opencv_ffmpeg_support,
+        "rtsp_capable": opencv_ffmpeg_support,  # same underlying dependency -- see comment above
+        "ffmpeg_cli_available": ffmpeg_available,
+        "annotated_video_playable_in_browser": ffmpeg_available,  # video_export.py re-encodes via this CLI
+        "mp4v_video_writer_available": mp4v_writer_ok,
+        "cameras": [],
+    }
 
 
 class OutageRequest(BaseModel):

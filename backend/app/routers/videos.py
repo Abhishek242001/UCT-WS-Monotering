@@ -234,6 +234,62 @@ def _annotated_dir() -> str:
 _annotated_videos: dict[str, dict] = {}  # annotated_id -> {path, org_id, source_video_id}
 
 
+def _save_annotated_meta(annotated_id: str, meta: dict) -> None:
+    """Same rationale as _save_video_meta above -- without this,
+    _annotated_videos loses every entry on a backend restart and
+    GET /videos/annotated/{id}/download 404s on anything generated
+    before the restart, even though the rendered file is still on disk."""
+    with open(_meta_path(meta["path"]), "w") as f:
+        json.dump({"annotated_id": annotated_id, **meta}, f)
+
+
+def _load_annotated_videos_from_disk() -> None:
+    annotated_dir = _annotated_dir()
+    if not os.path.isdir(annotated_dir):
+        return
+    loaded = 0
+    for name in os.listdir(annotated_dir):
+        if not name.endswith(".meta.json"):
+            continue
+        try:
+            with open(os.path.join(annotated_dir, name)) as f:
+                data = json.load(f)
+            annotated_id = data.pop("annotated_id")
+            if os.path.exists(data.get("path", "")):
+                _annotated_videos[annotated_id] = data
+                loaded += 1
+        except (json.JSONDecodeError, KeyError, OSError):
+            continue
+    if loaded:
+        print(f"[videos] Recovered {loaded} annotated video(s) from disk metadata after restart.")
+
+
+_load_annotated_videos_from_disk()
+
+
+@router.get("/videos/{video_id}/diagnostics")
+def video_diagnostics(
+    video_id: str, org_id: int, cam_id: int, num_samples: int = 8,
+    db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin),
+):
+    """Cheap (seconds, not minutes) sampling pass -- see
+    video_export.sample_diagnostics for exactly what runs and why. Use
+    this BEFORE running a full annotate_video render on a long video, or
+    to answer "is YOLO even detecting anyone" without waiting for one."""
+    video = _videos.get(video_id)
+    if not video:
+        raise HTTPException(404, "Video not found -- upload it first via POST /videos/upload")
+    verify_org_access(admin, video["org_id"])
+    verify_org_access(admin, org_id)
+    if num_samples < 1 or num_samples > 50:
+        raise HTTPException(422, "num_samples must be between 1 and 50")
+
+    try:
+        return video_export.sample_diagnostics(video["path"], db, org_id, cam_id, num_samples=num_samples)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
 @router.get("/videos/{video_id}/clip")
 def download_clip(video_id: str, seconds: int = 300, admin: AdminSession = Depends(require_admin)):
     """Downloads the first `seconds` of the original uploaded video, no
@@ -299,6 +355,7 @@ def create_annotated_video(
         raise HTTPException(422, str(e))
 
     _annotated_videos[annotated_id] = {"path": dest_path, "org_id": org_id, "source_video_id": video_id}
+    _save_annotated_meta(annotated_id, _annotated_videos[annotated_id])
     return {"annotated_id": annotated_id, "download_url": f"/videos/annotated/{annotated_id}/download", **result}
 
 
