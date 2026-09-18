@@ -320,10 +320,11 @@
         <div id="analysisDefaults" style="display:none; margin-top:14px">
           <p class="hint">Optional — override the defaults below, or leave them and a demo workstation covering the whole frame is created automatically.</p>
           <div class="row">
-            <div><label>Org ID (optional)</label><input id="vaOrgId" placeholder="default: 1"></div>
-            <div><label>Camera ID (optional)</label><input id="vaCamId" placeholder="auto-assigned per video"></div>
+            <div><label>Org ID (optional)</label><input id="vaOrgId" placeholder="default: 1" oninput="previewVideoRoi()"></div>
+            <div><label>Camera ID (optional)</label><input id="vaCamId" placeholder="auto-assigned per video" oninput="previewVideoRoi()"></div>
             <div><label>User ID (optional)</label><input id="vaUserId" placeholder="default: 1"></div>
           </div>
+          <div id="vaRoiPreview" class="hint"></div>
           <button class="primary" id="runAnalysisBtn" onclick="runAiAnalysis()" style="display:none">Run AI Analysis</button>
         </div>
       </div>
@@ -947,6 +948,30 @@ function uploadVideoFile(file) {
   xhr.send(fd);
 }
 
+let _vaRoiPreviewTimer = null;
+function previewVideoRoi() {
+  clearTimeout(_vaRoiPreviewTimer);
+  _vaRoiPreviewTimer = setTimeout(async () => {
+    const camId = document.getElementById('vaCamId').value;
+    const el = document.getElementById('vaRoiPreview');
+    if (!camId) { el.innerHTML = 'No Camera ID entered — a full-frame "Demo-Desk" ROI will be auto-created, with no employee assigned.'; return; }
+    const orgIdField = document.getElementById('vaOrgId').value;
+    const org_id = orgIdField ? parseInt(orgIdField) : getOrgId();
+    el.textContent = 'Checking saved ROIs for this camera…';
+    try {
+      const body = await api(`/workstations/check?org_id=${org_id}&cam_id=${camId}`);
+      if (!body.workstations || body.workstations.length === 0) {
+        el.innerHTML = `<b>No saved workstation found</b> for org ${org_id}, camera ${camId} — running analysis will auto-create a full-frame "Demo-Desk" ROI with no employee assigned. Draw one first on the Workstations tab if you want a real desk box and identity matching.`;
+      } else {
+        el.innerHTML = `<b>Found ${body.workstations.length} saved workstation(s)</b> for camera ${camId}: ` +
+          body.workstations.map(w => `${escapeHtml(w.name)} (${w.x1.toFixed(2)},${w.y1.toFixed(2)},${w.x2.toFixed(2)},${w.y2.toFixed(2)})`).join(', ') +
+          ' — analysis will match against these and any employees assigned to them.';
+      }
+    } catch (e) {
+      el.textContent = 'Could not check saved ROIs: ' + e.message;
+    }
+  }, 400);
+}
 async function runAiAnalysis() {
   if (!uploadedVideoId) return;
   const fd = new FormData();
