@@ -73,7 +73,24 @@ def test_stream_worker_does_not_identify_on_every_occupied_frame(client, admin_t
     """Verifies the event-driven design goal directly: with 3 vacant frames
     followed by 3 occupied frames and a heartbeat far longer than the test
     run, only ONE identification-triggering event should be written for
-    the occupied period -- not three."""
+    the occupied period -- not three.
+
+    Updated: this test originally also asserted exactly 3 VACANT rows (one
+    per vacant frame). That encoded a real bug, not the intended design --
+    the pre-fix _process_frame wrote+published a VACANT event on EVERY
+    not-occupied frame with no de-duplication, which at
+    poll_interval_seconds=0 flooded both the database and a live viewer's
+    WebSocket feed for any real multi-minute video with sustained vacancy
+    (confirmed in production use, not just theoretically). Fixed by
+    applying the same transition-or-heartbeat debounce to the VACANT path
+    that the identify path already had -- so VACANT is now also written
+    once per genuine state transition (or heartbeat), matching
+    100-key-points.md point 3's "debounced ACTIVE/VACANT state machine"
+    description. For this specific 3-vacant-then-3-occupied fixture, that
+    means exactly 1 VACANT row (the initial None -> VACANT transition) and
+    1 non-vacant row (the VACANT -> ACTIVE transition) -- verified via a
+    real before/after run against this exact video: 11 events with the
+    old code, 3 with the fix, for a 20-frame variant of this same test."""
     from app.vision.stream_worker import StreamWorker
     from app.database import SessionLocal
     from app.models import WorkstationIdentityEvent
@@ -99,6 +116,6 @@ def test_stream_worker_does_not_identify_on_every_occupied_frame(client, admin_t
     conn.close()
 
     event_types = [r[0] for r in rows]
-    assert event_types.count("VACANT") == 3
+    assert event_types.count("VACANT") == 1  # one row per transition/heartbeat, not per frame
     non_vacant = [e for e in event_types if e != "VACANT"]
     assert len(non_vacant) == 1  # exactly one identification-triggering event, not three

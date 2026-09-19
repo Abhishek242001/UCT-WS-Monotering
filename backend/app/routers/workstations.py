@@ -1,6 +1,8 @@
 import os
 import shutil
 import tempfile
+
+import cv2
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -10,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Workstation, WorkstationAssignment, Employee, EmployeeFaceGallery, WorkstationIdentityEvent
 from app import logic
-from app.vision import yolo_detector, face_embedder
+from app.vision import face_crop, yolo_detector, face_embedder
 from app.routers.admin_auth import require_admin, verify_org_access
 from app.models import AdminSession
 
@@ -164,14 +166,16 @@ async def simulate_detection(
     try:
         people = yolo_detector.detect_people(tmp_path)
         roi = {"x1": ws.x1, "y1": ws.y1, "x2": ws.x2, "y2": ws.y2}
-        occupied = any(yolo_detector.boxes_overlap(p, roi) for p in people)
+        occupying_person = face_crop.best_overlapping_person(people, roi)
+        occupied = occupying_person is not None
 
         assigned_employee_id = _current_assignment(db, org_id, cam_id, workstation_name)
         event_type, detected_employee_id, similarity, snr = "VACANT", None, None, None
 
         if occupied:
+            crop_path = face_crop.crop_person_region(cv2.imread(tmp_path), occupying_person)
             try:
-                live_embedding, live_width_px = face_embedder.extract_embedding(tmp_path)
+                live_embedding, live_width_px = face_embedder.extract_embedding(crop_path)
                 gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == org_id).all()
                 gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
                 grouped = logic.group_gallery_by_person(gallery)
@@ -190,7 +194,9 @@ async def simulate_detection(
                     if event_type == "UNKNOWN":
                         detected_employee_id = None
             except ValueError:
-                event_type = "UNKNOWN"  # occupied per YOLO, but no face found/matched in the frame
+                event_type = "UNKNOWN"  # occupied per YOLO, but no face found/matched in the cropped region
+            finally:
+                os.unlink(crop_path)
 
         event = WorkstationIdentityEvent(
             org_id=org_id, cam_id=cam_id, workstation_name=workstation_name, event_type=event_type,

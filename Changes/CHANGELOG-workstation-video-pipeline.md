@@ -350,3 +350,152 @@ RTSP footage before generating a full annotated video.
   `annotate_video` with a different value, the estimate won't match;
   not parameterized to keep the diagnostics endpoint's own signature
   simple.
+
+---
+
+## Addendum 2 — the actual "always UNKNOWN" root cause, found via the real repo zip
+
+Everything above this point was built against an incomplete local sandbox
+copy of this project that was missing `tests/`, `docs/`, and other
+top-level files present in the real repository. The person uploaded a
+full zip of the actual repo, which corrected several wrong assumptions
+made earlier in this session (see below) and surfaced the real root
+cause of the persistent "always UNKNOWN" face-recognition result.
+
+### Corrected: a test suite already existed
+Earlier changelogs/responses in this session stated "no automated test
+suite exists" and cited `stream_worker.py`'s own docstring referencing
+`tests/real-app-smoke/test_stream_worker.py` as a file that didn't exist.
+That was **wrong** -- it existed all along in the real repository; it
+was simply never present in the incomplete local copy being worked from.
+There are, in fact, two real suites: `tests/real-app-smoke/` (43 tests,
+exercises the actual `app.*` code, not a mock) and
+`tests/design-acceptance-suite/` (476 tests, a mock/contract-layer suite
+against a separate `src/mock_app.py`, per `100-key-points.md` point 100).
+
+### Real root cause found: `docs/100-key-points.md` point 30
+This file documents the project's actual design history and was not
+previously available. Point 30 explicitly specifies: **"Crop face
+detection to the workstation ROI (+padding) rather than the full
+frame"** -- documented as intended, never implemented. Confirmed by
+grep: zero cropping logic existed anywhere in `stream_worker.py`,
+`video_export.py`, or `workstations.py`.
+
+This is the actual, complete explanation for every "UNKNOWN with
+similarity=—" result reported this session, including after installing
+real `insightface` and re-enrolling: `extract_embedding` was running
+InsightFace's own face detector on the ENTIRE frame at its configured
+`det_size=(320,320)`. In a wide workstation/desk-view shot (as opposed
+to a close-up enrollment photo), a person's face is a small fraction of
+the frame -- after the internal resize to fit det_size, the face can
+become too small for the detector to find at all, even though YOLO
+correctly detects the full person and the face is clearly visible to a
+human. Point 39 of the same doc independently confirms the pixel-width
+mechanism: recognition needs ~80-120px face width for a confident match,
+and detection itself degrades well before that for a naive full-frame
+pass.
+
+### Changes
+
+**`backend/app/vision/face_crop.py` (new)** -- `crop_person_region(frame,
+person, padding_fraction=0.4)`: crops an in-memory frame to a detected
+person's box plus 40% padding, returns a temp JPEG path (caller unlinks).
+`best_overlapping_person(people, roi, min_overlap_fraction=0.3)`: of all
+YOLO detections, returns the one most likely to be this ROI's actual
+occupant (highest confidence among those clearing `boxes_overlap`), or
+`None`. Deliberately not added to `yolo_detector.py` -- that module's
+own docstring explicitly excludes ROI-cropping as its responsibility.
+
+**`backend/app/vision/stream_worker.py`** -- `_process_frame` now finds
+the specific occupying person via `face_crop.best_overlapping_person`
+instead of a bare `any(boxes_overlap(...))` boolean, and passes the raw
+`frame` + that `person` into `_identify`, which crops before calling
+`extract_embedding` instead of using the full saved frame.
+
+**`backend/app/vision/video_export.py`** -- same change applied to
+`annotate_video`'s detection loop and its own `_identify` function.
+
+**`backend/app/routers/workstations.py`** -- same change applied to
+`simulate_detection` (the endpoint behind "Try Detection" -- the exact
+endpoint used throughout this session's troubleshooting). Added `cv2`
+import (needed to read the frame before cropping) and `face_crop` to the
+existing `app.vision` import line.
+
+### Verification
+
+1. **The failure, proven real** (not assumed): built a synthetic wide
+   frame from a real photo with real faces (`ultralytics`' own bundled
+   `zidane.jpg`), empirically calibrated to a scale (0.4x) where YOLO
+   still detects both people but InsightFace's full-frame detector fails
+   on both -- confirmed via direct calls to `yolo_detector.detect_people`
+   and `face_embedder.extract_embedding` before writing any fix code.
+2. **The fix, proven real**: cropping to each YOLO-detected person's box
+   with 40% padding made face detection succeed for both people in the
+   same synthetic frame (measured face widths 55.2px and 43.7px).
+3. **End-to-end, through the real API**: enrolled a person from a
+   close-up crop (mapped geometrically from the wide frame's detected
+   box back to the original full-resolution photo, since YOLO's
+   detection order doesn't guarantee the same physical person shares an
+   index across different images), assigned them to a workstation, then
+   called `POST /workstations/simulate_detection` against the wide
+   frame. Before the fix: `event_type=UNKNOWN, similarity=None`
+   (confirmed separately). After the fix: `event_type=MATCH,
+   detected_employee_id` correct, `similarity=0.939`.
+4. **Regression test added**: `tests/real-app-smoke/test_face_crop.py`
+   (2 tests) -- one confirms the full-frame failure is real and current
+   (fails loudly if `det_size`/detector pack changes enough to make the
+   fix's premise stale), one runs the full enroll -> assign -> detect
+   flow through the real API and asserts `MATCH` with `similarity > 0.8`.
+5. **Full existing suite re-run after the fix**: `tests/real-app-smoke/`
+   went from 41 passed / 2 failed to 43 passed (see below for what the 2
+   failures actually were and how each was resolved).
+   `tests/design-acceptance-suite/` (mock-layer, unaffected by these
+   changes since it doesn't touch real `app.*` code): 454 passed, 22
+   skipped (pending future work, documented per-skip, not failures).
+   Combined `tests/real-app-smoke/` + `backend/tests/`: 62 passed.
+
+### Two pre-existing test issues found and fixed while verifying (neither is a new regression from this session's earlier work being wrong -- see each)
+
+1. **`test_stream_worker_does_not_identify_on_every_occupied_frame`**
+   asserted exactly 3 `VACANT` DB rows for 3 vacant frames -- this
+   encoded the OLD, buggy, undebounced behavior from before this
+   session's earlier VACANT-flood fix (documented in Addendum 1 above),
+   which is the actual, confirmed cause of the frontend event-log
+   flooding reported earlier in this session. The debounced version
+   correctly produces exactly 1 `VACANT` row (initial transition) + 1
+   non-vacant row. Updated the test's assertion and docstring to
+   document why, rather than silently patching it.
+2. **`test_delete_employee_with_real_history_does_not_crash`** failed
+   with a 404 on `/attendance/today` -- traced fully and confirmed this
+   is **not an application bug**: the test hardcoded
+   `"timestamp": "2026-09-09T09:00:00"` when recording attendance, but
+   `/attendance/today` correctly looks up the record by the REAL current
+   date, which had since moved on. Fixed by using
+   `datetime.utcnow().isoformat()` in the test instead of a hardcoded
+   date that will inevitably drift.
+3. **Unrelated fixture conflict, found while running both suites
+   together**: `backend/tests/test_video_pipeline.py` hardcoded the
+   login password `"ChangeMe123!"`, which broke when run in the same
+   pytest process as `tests/real-app-smoke/` (its `conftest.py` sets
+   `DEFAULT_ADMIN_PASSWORD` to a different value process-wide, which the
+   real seeding logic then also picks up for the other file's fresh DB).
+   Fixed by reading `os.environ.get("DEFAULT_ADMIN_PASSWORD", ...)` the
+   same way `app.main._seed_default_admin` actually does.
+
+## Remaining Issues (this addendum)
+
+- The distance-calibration curve issue from Addendum 1 (near_k/near_sigma0
+  computed but never consumed by live detection) is **unchanged** by this
+  fix -- cropping fixes whether a face is *detected* at all; it does not
+  wire distance-adaptive confidence into the match decision. Still an
+  open, separate decision for the user.
+- `padding_fraction=0.4` was chosen as a reasonable default and validated
+  against one synthetic scenario -- not tuned against a range of real
+  camera distances/angles. If detection is still unreliable at the
+  user's actual deployed camera distance after this fix, tuning this
+  value (or the underlying `det_size`) is the next lever to pull.
+- This fix improves *detection* (finding a face at all) but does nothing
+  for *recognition accuracy* at genuinely long range/small face widths --
+  `docs/100-key-points.md` point 39's ~80-120px guidance and points
+  39-48's broader camera-placement guidance still apply and were not
+  re-evaluated against the user's real deployment in this session.

@@ -40,7 +40,7 @@ import cv2
 
 from app import logic
 from app.models import Workstation, WorkstationAssignment, EmployeeFaceGallery, Employee
-from app.vision import yolo_detector, face_embedder
+from app.vision import face_crop, yolo_detector, face_embedder
 
 HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 30))
 
@@ -229,15 +229,22 @@ def _assigned_employee(db, org_id: int, cam_id: int, name: str) -> str | None:
     return row.employee_id if row else None
 
 
-def _identify(db, org_id: int, frame_path: str, assigned_employee_id: str | None):
+def _identify(db, org_id: int, frame, person, assigned_employee_id: str | None):
     """Same logic as StreamWorker._identify -- kept as a separate copy
     here (rather than importing StreamWorker's method) since that method
     is bound to a live worker's per-stream state; this module runs in a
-    batch/offline context with its own frame-level state instead."""
+    batch/offline context with its own frame-level state instead. Crops
+    to the detected person's box first -- see app/vision/face_crop.py
+    for why this matters (a small/distant face in a full-frame shot can
+    fail InsightFace's own detector entirely, even when clearly visible
+    to a human)."""
+    crop_path = face_crop.crop_person_region(frame, person)
     try:
-        live_embedding, _w = face_embedder.extract_embedding(frame_path)
+        live_embedding, _w = face_embedder.extract_embedding(crop_path)
     except ValueError:
         return "UNKNOWN", None, None
+    finally:
+        os.unlink(crop_path)
 
     gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == org_id).all()
     gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
@@ -305,7 +312,8 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
                     last_people = yolo_detector.detect_people(tmp_path)
                     now = time.monotonic()
                     for name, roi in rois.items():
-                        occupied = any(yolo_detector.boxes_overlap(p, roi) for p in last_people)
+                        occupying_person = face_crop.best_overlapping_person(last_people, roi)
+                        occupied = occupying_person is not None
                         new_status = "ACTIVE" if occupied else "VACANT"
                         previous_status = last_status.get(name)
                         last_status[name] = new_status
@@ -317,7 +325,7 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
                         heartbeat_due = (now - last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
                         if became_active or heartbeat_due:
                             last_identify_time[name] = now
-                            last_result[name] = _identify(db, org_id, tmp_path, assigned)
+                            last_result[name] = _identify(db, org_id, frame, occupying_person, assigned)
                 finally:
                     os.unlink(tmp_path)
 

@@ -28,6 +28,7 @@ import time
 
 import cv2
 
+from app.vision import face_crop
 from app import database as db_module
 from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEvent, EmployeeFaceGallery, Employee
 from app import logic
@@ -127,15 +128,21 @@ class StreamWorker(threading.Thread):
             "similarity": similarity, "snr": snr, "frame_number": self.frames_processed,
         })
 
-    def _identify(self, db, frame_path: str, assigned_employee_id: str | None):
-        """Runs the real matching pipeline: extract an embedding from the
-        frame, single-pass match against the enrolled gallery (app/logic.py
-        -- the same functions verified by the design-acceptance-suite),
-        and gate the decision through decide_match_status."""
+    def _identify(self, db, frame, person, assigned_employee_id: str | None):
+        """Runs the real matching pipeline: crop to the detected person's
+        box (with padding -- see app/vision/face_crop.py for why this
+        matters), extract an embedding from that crop rather than the
+        whole frame, single-pass match against the enrolled gallery
+        (app/logic.py -- the same functions verified by the
+        design-acceptance-suite), and gate the decision through
+        decide_match_status."""
+        crop_path = face_crop.crop_person_region(frame, person)
         try:
-            live_embedding, _width_px = face_embedder.extract_embedding(frame_path)
+            live_embedding, _width_px = face_embedder.extract_embedding(crop_path)
         except ValueError:
-            return "UNKNOWN", None, None, None  # occupied per YOLO, but no face found in the frame
+            return "UNKNOWN", None, None, None  # occupied per YOLO, but no face found in the cropped region
+        finally:
+            os.unlink(crop_path)
 
         gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == self.org_id).all()
         gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
@@ -165,7 +172,8 @@ class StreamWorker(threading.Thread):
             now = time.monotonic()
 
             for name, roi in rois.items():
-                occupied = any(yolo_detector.boxes_overlap(p, roi) for p in people)
+                occupying_person = face_crop.best_overlapping_person(people, roi)
+                occupied = occupying_person is not None
                 new_status = "ACTIVE" if occupied else "VACANT"
                 previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
                 self._last_occupancy[name] = new_status
@@ -193,7 +201,7 @@ class StreamWorker(threading.Thread):
                 # thereafter -- never on every frame.
                 if status_changed or heartbeat_due:
                     self._last_identify_time[name] = now
-                    event_type, detected, similarity, snr = self._identify(db, tmp_path, assigned)
+                    event_type, detected, similarity, snr = self._identify(db, frame, occupying_person, assigned)
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)
                 # else: still occupied, within the heartbeat window -- no
                 # identification call this frame, matching the documented

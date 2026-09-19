@@ -12,6 +12,7 @@ answers a different, narrower question: "does the actual shipped code
 really run?"
 """
 import io
+from datetime import datetime
 
 
 def auth(token):
@@ -135,7 +136,7 @@ def test_delete_employee_with_real_history_does_not_crash(client, admin_token, s
                 json={"org_id": 1, "shift_id": shift_id, "effective_from": "2026-01-01"})
 
     client.post("/attendance/record_detection", headers=h,
-                json={"org_id": 1, "employee_id": "EMP-HISTORY", "timestamp": "2026-09-09T09:00:00"})
+                json={"org_id": 1, "employee_id": "EMP-HISTORY", "timestamp": datetime.utcnow().isoformat()})
 
     resp = client.request("DELETE", "/employees/delete", headers=h, json={"org_id": 1, "employee_id": "EMP-HISTORY"})
     assert resp.status_code == 200, resp.text  # previously: 500 IntegrityError

@@ -45,7 +45,14 @@ def client():
 
 @pytest.fixture(scope="module")
 def auth_headers(client):
-    resp = client.post("/admin/login", json={"username": "hr_admin1", "password": "ChangeMe123!"})
+    # Reads DEFAULT_ADMIN_PASSWORD the same way app.main._seed_default_admin
+    # actually does, rather than hardcoding "ChangeMe123!" -- a hardcoded
+    # value here breaks when this file runs in the same pytest process as
+    # tests/real-app-smoke/ (its conftest sets DEFAULT_ADMIN_PASSWORD to a
+    # different value process-wide, which _seed_default_admin then also
+    # picks up for THIS file's fresh DB, since env vars aren't test-scoped).
+    password = os.environ.get("DEFAULT_ADMIN_PASSWORD", "ChangeMe123!")
+    resp = client.post("/admin/login", json={"username": "hr_admin1", "password": password})
     assert resp.status_code == 200, resp.text
     token = resp.json()["session_token"]
     return {"Authorization": f"Bearer {token}"}
