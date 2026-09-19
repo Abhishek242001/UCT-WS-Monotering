@@ -84,6 +84,23 @@ def extract_embedding(image_path: str) -> tuple[list[float], float]:
             raise ValueError(f"Could not decode image file: {image_path}")
         faces = _insightface_app.get(img)
         if not faces:
+            # Previously raised with no diagnostic trace at all -- the
+            # caller (_identify) catches this ValueError and just returns
+            # UNKNOWN, so without this log line there was literally no
+            # record anywhere of WHY a photo with a visibly-present face
+            # (to a human) produced no match: too-small/distant face vs
+            # det_size=(320,320) is the most common real cause, but a
+            # decode issue, bad orientation, or an unusual crop could
+            # also produce this -- logging the actual frame size at
+            # least narrows it down without needing the photo emailed in.
+            h, w = img.shape[:2]
+            logger.warning(
+                "No face detected in %dx%d image (path=%s) -- if a face IS visibly "
+                "present, it is likely too small at the current det_size=(320,320) "
+                "for this detector pack; a face occupying a small fraction of a "
+                "wide/distant shot is the most common cause.",
+                w, h, image_path,
+            )
             raise ValueError("No face detected in image")
         face = faces[0]
         width_px = float(face.bbox[2] - face.bbox[0])
