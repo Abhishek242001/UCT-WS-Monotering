@@ -3,15 +3,15 @@ Batch video export: (1) a fast raw clip extractor, and (2) a detection-
 annotated renderer that draws what the live StreamWorker pipeline would
 have decided directly onto the video frames, for download.
 
-Why this exists: StreamWorker (see stream_worker.py) only ever pushes
-JSON events (VACANT/ACTIVE, identity, similarity) back to the browser --
-it never streams frame images. There is currently no way to *see* the
-detection boxes, ROI boxes, or identity result overlaid on footage
-anywhere in this project. This module produces that as a downloadable
-file instead, reusing the exact same detection/identify logic
-(yolo_detector, boxes_overlap, face_embedder, app.logic) StreamWorker
-uses, so what's drawn here matches what the live pipeline would decide --
-same confidence threshold, same overlap rule, same identify() gating.
+The actual box/ROI/status drawing is shared with the live pipeline via
+app/vision/frame_annotate.py (see that module for why) -- this module
+still owns the render loop, YOLO/identify calls, and video I/O.
+
+Note: StreamWorker (see stream_worker.py) now ALSO pushes live annotated
+frames over the "frame" WebSocket message (added alongside this refactor)
+using the same frame_annotate.draw_annotations() this module calls below
+-- so what you see live and what this module renders for download match,
+from one drawing implementation, not two that could drift apart.
 
 Honest scope notes:
  - This was exercised in this sandbox against a short synthetic clip
@@ -40,14 +40,9 @@ import cv2
 
 from app import logic
 from app.models import Workstation, WorkstationAssignment, EmployeeFaceGallery, Employee
-from app.vision import face_crop, yolo_detector, face_embedder
+from app.vision import yolo_detector, face_embedder, frame_annotate
 
 HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 30))
-
-_PERSON_COLOR = (60, 200, 60)     # BGR: green
-_ROI_COLOR = (255, 130, 40)       # BGR: blue-orange
-_ACTIVE_COLOR = (0, 200, 0)       # BGR: green
-_VACANT_COLOR = (60, 60, 220)     # BGR: red
 
 
 def _ffmpeg_available() -> bool:
@@ -229,22 +224,15 @@ def _assigned_employee(db, org_id: int, cam_id: int, name: str) -> str | None:
     return row.employee_id if row else None
 
 
-def _identify(db, org_id: int, frame, person, assigned_employee_id: str | None):
+def _identify(db, org_id: int, frame_path: str, assigned_employee_id: str | None):
     """Same logic as StreamWorker._identify -- kept as a separate copy
     here (rather than importing StreamWorker's method) since that method
     is bound to a live worker's per-stream state; this module runs in a
-    batch/offline context with its own frame-level state instead. Crops
-    to the detected person's box first -- see app/vision/face_crop.py
-    for why this matters (a small/distant face in a full-frame shot can
-    fail InsightFace's own detector entirely, even when clearly visible
-    to a human)."""
-    crop_path = face_crop.crop_person_region(frame, person)
+    batch/offline context with its own frame-level state instead."""
     try:
-        live_embedding, _w = face_embedder.extract_embedding(crop_path)
+        live_embedding, _w = face_embedder.extract_embedding(frame_path)
     except ValueError:
         return "UNKNOWN", None, None
-    finally:
-        os.unlink(crop_path)
 
     gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == org_id).all()
     gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
@@ -312,8 +300,7 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
                     last_people = yolo_detector.detect_people(tmp_path)
                     now = time.monotonic()
                     for name, roi in rois.items():
-                        occupying_person = face_crop.best_overlapping_person(last_people, roi)
-                        occupied = occupying_person is not None
+                        occupied = any(yolo_detector.boxes_overlap(p, roi) for p in last_people)
                         new_status = "ACTIVE" if occupied else "VACANT"
                         previous_status = last_status.get(name)
                         last_status[name] = new_status
@@ -325,39 +312,13 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
                         heartbeat_due = (now - last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
                         if became_active or heartbeat_due:
                             last_identify_time[name] = now
-                            last_result[name] = _identify(db, org_id, frame, occupying_person, assigned)
+                            last_result[name] = _identify(db, org_id, tmp_path, assigned)
                 finally:
                     os.unlink(tmp_path)
 
             # Draw on every frame using the latest cached detection --
             # keeps output video smooth even when detect_every_n_frames > 1.
-            for p in last_people:
-                x1, y1 = int(p.x1 * w), int(p.y1 * h)
-                x2, y2 = int(p.x2 * w), int(p.y2 * h)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), _PERSON_COLOR, 2)
-                cv2.putText(frame, f"person {p.confidence:.2f}", (x1, max(12, y1 - 6)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, _PERSON_COLOR, 1, cv2.LINE_AA)
-
-            banner_y = 24
-            for name, roi in rois.items():
-                rx1, ry1 = int(roi["x1"] * w), int(roi["y1"] * h)
-                rx2, ry2 = int(roi["x2"] * w), int(roi["y2"] * h)
-                status = last_status.get(name, "VACANT")
-                color = _ACTIVE_COLOR if status == "ACTIVE" else _VACANT_COLOR
-                cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), _ROI_COLOR, 2)
-
-                event_type, detected, similarity = last_result.get(name, ("VACANT", None, None))
-                box_label = f"{name}: {status}"
-                if status == "ACTIVE" and event_type != "ACTIVE":
-                    box_label += f" | {event_type}"
-                    if detected:
-                        box_label += f" ({detected}, sim={similarity:.2f})"
-                cv2.putText(frame, box_label, (rx1, max(12, ry1 - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2.LINE_AA)
-
-                cv2.putText(frame, box_label, (10, banner_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-                banner_y += 24
+            frame_annotate.draw_annotations(frame, w, h, rois, last_status, last_result, last_people)
 
             writer.write(frame)
             frame_idx += 1

@@ -201,6 +201,13 @@
     </div>
 
     <div class="card">
+      <h2>Live preview</h2>
+      <p class="hint">The actual camera frame with detection boxes and identity status drawn on it, updated live while a stream is running — not just the text event log below.</p>
+      <img id="livePreviewImg" class="live-preview" alt="">
+      <div id="livePreviewMsg" class="hint">Start a stream above to see the live preview here.</div>
+    </div>
+
+    <div class="card">
       <h2>Active streams</h2>
       <table>
         <thead><tr><th>Stream ID</th><th>Source</th><th>Alive</th><th>Frames processed</th><th>Opened OK</th><th></th></tr></thead>
@@ -284,6 +291,7 @@
     <div class="card" id="analysisResultsCard" style="display:none">
       <h2>Live analysis results</h2>
       <div id="analysisStatusMsg" class="hint"></div>
+      <img id="vaLivePreviewImg" class="live-preview" alt="">
       <div class="progress-outer" id="analysisProgressWrap">
         <div class="progress-inner" id="analysisProgressBar"><span id="analysisProgressLabel">0%</span></div>
       </div>

@@ -85,7 +85,15 @@ async def start_stream(req: StreamStartRequest, _admin=Depends(require_admin)):
                                   req.max_frames, req.poll_interval_seconds)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    return {"stream_id": stream_id, "hls_url": f"/hls/{stream_id}/playlist.m3u8", "status": "started"}
+    # NOTE: this response previously also included an "hls_url" field
+    # (f"/hls/{stream_id}/playlist.m3u8") that no endpoint anywhere in
+    # this backend ever served -- confirmed by searching the whole
+    # app/ tree for "hls" while building the live-preview feature below.
+    # Removed rather than left in place claiming a capability that
+    # doesn't exist; the real live-viewing path is now the "frame"
+    # messages on the existing /ws/streams/{stream_id} WebSocket (see
+    # stream_worker.py).
+    return {"stream_id": stream_id, "status": "started"}
 
 
 class StreamStopRequest(BaseModel):
@@ -111,7 +119,7 @@ def stop_stream(req: StreamStopRequest, _admin=Depends(require_admin)):
 def list_streams(org_id: int, _admin=Depends(require_admin)):
     return {"streams": [
         {"stream_id": sid, "source": _mask_credentials(w.source), "org_id": w.org_id, "cam_id": w.cam_id,
-         "hls_url": f"/hls/{sid}/playlist.m3u8", "is_alive": w.is_alive(),
+         "is_alive": w.is_alive(),
          "frames_processed": w.frames_processed, "source_opened": w.source_opened}
         for sid, w in _workers.items() if w.org_id == org_id
     ]}

@@ -17,3 +17,14 @@ nav button.active{ color:white; border-bottom-color: var(--amber); }
 nav button:hover{ color:white; }
 
 main{ max-width:1100px; margin:28px auto; padding:0 20px; }
+
+.live-preview{
+  display:block; max-width:100%; border-radius:8px; border:1px dashed var(--border);
+  background:#F5F5FA; min-height:180px; margin:8px 0;
+}
+/* Browsers render a broken-image icon + alt text for an <img> with no
+   src yet (or a src that fails) -- deliberately left with no src until
+   the first "frame" WebSocket message arrives, so this just keeps that
+   empty state from looking like a rendering bug rather than "nothing
+   has streamed yet". */
+.live-preview:not([src]){ min-height:220px; }

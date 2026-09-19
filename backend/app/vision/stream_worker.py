@@ -11,6 +11,14 @@ Section 3.2 of the project documentation:
     same trigger design discussed at length for the ADAR merge, now
     actually implemented against a real (or file-based, for testing)
     video source instead of only against single uploaded stills.
+  - A live annotated-frame preview (boxes + status drawn on the actual
+    frame, JPEG-encoded, base64) is ALSO pushed over the same "frame"
+    WebSocket message, throttled independently of the above (see
+    LIVE_FRAME_MIN_INTERVAL_SECONDS) -- this is what lets both a live
+    RTSP camera and a video-analysis run be actually *watched* live,
+    not just read as a text event log. Drawing reuses
+    app/vision/frame_annotate.py, the same code the "download annotated
+    video" feature uses, so live and downloaded output match.
 
 Honest scope note: this was verified in this repository's own build
 process against a real multi-frame video (a looped photo containing real,
@@ -19,8 +27,11 @@ against a live RTSP camera, since no camera hardware is available in a
 sandboxed build environment. The RTSP/HTTP code path is unchanged
 OpenCV.VideoCapture usage and should work identically against a real
 camera URL; only the *source* differs between what was tested here and a
-real deployment.
+real deployment. The same applies to the live frame push below: verified
+against the synthetic test video's frames, not against real RTSP network
+jitter/bandwidth.
 """
+import base64
 import os
 import tempfile
 import threading
@@ -28,13 +39,22 @@ import time
 
 import cv2
 
-from app.vision import face_crop
 from app import database as db_module
 from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEvent, EmployeeFaceGallery, Employee
 from app import logic
-from app.vision import yolo_detector, face_embedder, event_bus
+from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate
 
 HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 30))
+
+# Live frame preview is throttled independently of both the poll interval
+# AND the identify heartbeat above: pushing a full base64 JPEG on every
+# single processed frame would flood the WebSocket, especially for video
+# analysis, which runs with poll_interval_seconds=0 (as fast as the CPU
+# can decode+detect). This caps it to a steady, browser-friendly rate
+# regardless of how fast frames are actually being processed underneath.
+LIVE_FRAME_PUBLISH_FPS = float(os.environ.get("LIVE_FRAME_PUBLISH_FPS", 4))
+LIVE_FRAME_MIN_INTERVAL_SECONDS = 1.0 / LIVE_FRAME_PUBLISH_FPS if LIVE_FRAME_PUBLISH_FPS > 0 else 0
+LIVE_FRAME_JPEG_QUALITY = int(os.environ.get("LIVE_FRAME_JPEG_QUALITY", 70))
 
 
 class StreamWorker(threading.Thread):
@@ -55,6 +75,8 @@ class StreamWorker(threading.Thread):
         self.source_opened = False
         self._last_occupancy: dict[str, str] = {}       # workstation_name -> "ACTIVE"/"VACANT"
         self._last_identify_time: dict[str, float] = {}  # workstation_name -> monotonic time
+        self._last_result: dict[str, tuple] = {}          # workstation_name -> (event_type, detected_employee_id, similarity), for live-frame labels between identify() calls
+        self._last_frame_publish_time: float = -1e9
 
     def stop(self):
         self._stop_event.set()
@@ -122,27 +144,58 @@ class StreamWorker(threading.Thread):
         )
         db.add(event)
         db.commit()
+        # Cached so _maybe_publish_frame can keep labeling the live
+        # preview correctly on frames where identify() doesn't run this
+        # cycle (mirrors video_export.annotate_video()'s last_result
+        # cache, which does the same for the downloaded-video path).
+        self._last_result[workstation_name] = (event_type, detected, similarity)
         self._publish({
             "type": "event", "workstation_name": workstation_name, "event_type": event_type,
             "assigned_employee_id": assigned, "detected_employee_id": detected,
             "similarity": similarity, "snr": snr, "frame_number": self.frames_processed,
         })
 
-    def _identify(self, db, frame, person, assigned_employee_id: str | None):
-        """Runs the real matching pipeline: crop to the detected person's
-        box (with padding -- see app/vision/face_crop.py for why this
-        matters), extract an embedding from that crop rather than the
-        whole frame, single-pass match against the enrolled gallery
-        (app/logic.py -- the same functions verified by the
-        design-acceptance-suite), and gate the decision through
-        decide_match_status."""
-        crop_path = face_crop.crop_person_region(frame, person)
+    def _maybe_publish_frame(self, frame, w: int, h: int, rois: dict[str, dict], people: list):
+        """Throttled live preview: draws the current occupancy/identity
+        state onto a COPY of the frame (never mutates the frame the
+        caller still needs) and pushes it as a "frame" WebSocket message,
+        at most LIVE_FRAME_PUBLISH_FPS times per second regardless of how
+        fast frames are actually being processed. `people` is this
+        frame's own freshly-computed YOLO detections (detection already
+        runs on every processed frame, unlike identify(), so this needs
+        no cross-frame caching the way _last_result does). A no-op when
+        this worker has no stream_id/loop (e.g. a plain synchronous run
+        with no live subscriber) -- _publish() already handles that, but
+        the JPEG encode is skipped too in that case rather than wasted."""
+        if not (self.stream_id and self.loop):
+            return
+        now = time.monotonic()
+        if (now - self._last_frame_publish_time) < LIVE_FRAME_MIN_INTERVAL_SECONDS:
+            return
+        self._last_frame_publish_time = now
+
+        annotated = frame.copy()
+        frame_annotate.draw_annotations(
+            annotated, w, h, rois, self._last_occupancy, self._last_result, people
+        )
+        ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, LIVE_FRAME_JPEG_QUALITY])
+        if not ok:
+            return  # encode failure (extremely unlikely for a valid frame) -- just skip this preview tick
+        encoded = base64.b64encode(buf).decode("ascii")
+        self._publish({
+            "type": "frame", "frame_number": self.frames_processed,
+            "image": f"data:image/jpeg;base64,{encoded}",
+        })
+
+    def _identify(self, db, frame_path: str, assigned_employee_id: str | None):
+        """Runs the real matching pipeline: extract an embedding from the
+        frame, single-pass match against the enrolled gallery (app/logic.py
+        -- the same functions verified by the design-acceptance-suite),
+        and gate the decision through decide_match_status."""
         try:
-            live_embedding, _width_px = face_embedder.extract_embedding(crop_path)
+            live_embedding, _width_px = face_embedder.extract_embedding(frame_path)
         except ValueError:
-            return "UNKNOWN", None, None, None  # occupied per YOLO, but no face found in the cropped region
-        finally:
-            os.unlink(crop_path)
+            return "UNKNOWN", None, None, None  # occupied per YOLO, but no face found in the frame
 
         gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == self.org_id).all()
         gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
@@ -172,8 +225,7 @@ class StreamWorker(threading.Thread):
             now = time.monotonic()
 
             for name, roi in rois.items():
-                occupying_person = face_crop.best_overlapping_person(people, roi)
-                occupied = occupying_person is not None
+                occupied = any(yolo_detector.boxes_overlap(p, roi) for p in people)
                 new_status = "ACTIVE" if occupied else "VACANT"
                 previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
                 self._last_occupancy[name] = new_status
@@ -201,10 +253,18 @@ class StreamWorker(threading.Thread):
                 # thereafter -- never on every frame.
                 if status_changed or heartbeat_due:
                     self._last_identify_time[name] = now
-                    event_type, detected, similarity, snr = self._identify(db, frame, occupying_person, assigned)
+                    event_type, detected, similarity, snr = self._identify(db, tmp_path, assigned)
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)
                 # else: still occupied, within the heartbeat window -- no
                 # identification call this frame, matching the documented
                 # "tens of calls per day, not per frame" design goal.
+
+            # Live preview push: once per processed frame (covering every
+            # workstation's current box/status together in one image),
+            # throttled internally by _maybe_publish_frame regardless of
+            # how many workstations are configured or how fast frames are
+            # arriving.
+            h, w = frame.shape[:2]
+            self._maybe_publish_frame(frame, w, h, rois, people)
         finally:
             os.unlink(tmp_path)

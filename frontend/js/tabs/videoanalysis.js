@@ -173,7 +173,9 @@ async function runAiAnalysis() {
   const MAX_EVENT_LINES = 300;
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
-    if (msg.type === 'progress') {
+    if (msg.type === 'frame') {
+      document.getElementById('vaLivePreviewImg').src = msg.image;
+    } else if (msg.type === 'progress') {
       if (msg.total_frames) {
         const pct = Math.round((msg.frames_processed / msg.total_frames) * 100);
         document.getElementById('analysisProgressBar').style.width = pct + '%';

@@ -317,6 +317,51 @@ def test_live_results_websocket_streams_events_for_uploaded_video(client, admin_
     assert completed["reason"] == "source_ended"
 
 
+def test_live_results_websocket_includes_frame_previews(client, admin_token, synthetic_video):
+    """Confirms the NEW "frame" message type: a live, boxes-drawn preview
+    image pushed over the same WebSocket the "centerpiece" test above
+    already covers for started/progress/event/completed. Verifies both
+    that at least one arrives (throttling means not every processed
+    frame necessarily produces one -- see LIVE_FRAME_PUBLISH_FPS in
+    stream_worker.py) and that it's a genuinely decodable JPEG data URL,
+    not just a string that looks plausible."""
+    import base64
+    import cv2
+    import numpy as np
+
+    video_id = upload(client, admin_token, synthetic_video).json()["video_id"]
+    analyze = client.post(f"/videos/{video_id}/analyze", headers=auth(admin_token),
+                           data={"max_frames": 6, "poll_interval_seconds": 0})
+    stream_id = analyze.json()["stream_id"]
+
+    with client.websocket_connect(f"/ws/streams/{stream_id}?token={admin_token}") as ws:
+        messages = []
+        while True:
+            msg = ws.receive_json()
+            messages.append(msg)
+            if msg["type"] == "completed":
+                break
+
+    frame_messages = [m for m in messages if m["type"] == "frame"]
+    assert len(frame_messages) >= 1, (
+        "expected at least one live 'frame' preview message "
+        f"(got message types: {[m['type'] for m in messages]})"
+    )
+
+    first = frame_messages[0]
+    assert "frame_number" in first
+    assert first["image"].startswith("data:image/jpeg;base64,")
+
+    # Decode it for real -- not just a prefix check -- to prove this is
+    # an actual valid JPEG, not a malformed/truncated encode.
+    raw_b64 = first["image"].split(",", 1)[1]
+    jpeg_bytes = base64.b64decode(raw_b64)
+    arr = np.frombuffer(jpeg_bytes, dtype="uint8")
+    decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    assert decoded is not None
+    assert decoded.shape[0] > 0 and decoded.shape[1] > 0
+
+
 def test_websocket_rejects_invalid_token(client, admin_token, synthetic_video):
     video_id = upload(client, admin_token, synthetic_video).json()["video_id"]
     analyze = client.post(f"/videos/{video_id}/analyze", headers=auth(admin_token),
