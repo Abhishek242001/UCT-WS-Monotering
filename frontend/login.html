@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in — UCT Workstation Monitor</title>
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/login.css">
+</head>
+<body>
+
+<div id="loginScreen" class="login-wrap">
+  <div class="card login-card">
+    <img src="assets/logo.png" alt="UCT" onerror="this.style.display='none'">
+    <h2>Sign in to UCT Workstation Monitor</h2>
+    <div id="loginMsg"></div>
+    <div style="text-align:left">
+      <label>Username</label>
+      <input id="loginUsername" value="hr_admin1">
+      <label style="margin-top:10px">Password</label>
+      <input id="loginPassword" type="password" placeholder="see server console on first run">
+    </div>
+    <button class="primary" style="width:100%" onclick="doLogin()">Sign in</button>
+    <p class="hint">Default credentials are printed to the backend's console the first time it starts. Change them via DEFAULT_ADMIN_USERNAME / DEFAULT_ADMIN_PASSWORD in your .env.</p>
+    <p class="hint" id="loginApiTarget" style="word-break:break-all">Backend target: resolving…</p>
+    <p class="hint">
+      <a href="#" onclick="downloadAppLog(); return false;">Download debug log</a>
+      &nbsp;·&nbsp; If login fails, this log (plus your browser's devtools Console/Network tab) has the actual error.
+    </p>
+  </div>
+</div>
+
+<script src="js/log.js"></script>
+<script src="js/api.js"></script>
+<script src="js/login.page.js"></script>
+</body>
+</html>

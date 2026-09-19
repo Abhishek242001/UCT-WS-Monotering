@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UCT Workstation Monitor</title>
+<link rel="stylesheet" href="css/base.css">
+<link rel="stylesheet" href="css/dashboard.css">
+</head>
+<body>
+
+<header>
+  <img src="assets/logo.png" alt="UCT" onerror="this.style.display='none'">
+  <h1>UCT Workstation Monitor</h1>
+  <div style="margin-left:24px; display:flex; align-items:center; gap:6px;">
+    <label style="color:#CFCFFA; margin:0; font-size:12px">Org ID</label>
+    <input id="globalOrgId" value="1" style="width:60px; padding:5px 8px;" onchange="loadIdentityStatus(); loadWorkstations(); loadEmployees();">
+  </div>
+  <div class="status" style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">
+    <span id="whoAmI"></span>
+    <span id="backendStatus">connecting…</span>
+    <a href="#" onclick="downloadAppLog(); return false;" style="color:#CFCFFA">Download debug log</a>
+  </div>
+  <button class="secondary" style="margin-left:14px" onclick="logout()">Sign out</button>
+</header>
+<nav>
+  <button class="active" onclick="showTab('dashboard')">Dashboard</button>
+  <button onclick="showTab('workstations')">Workstations</button>
+  <button onclick="showTab('employees'); loadDeclaredDistances();">Employees</button>
+  <button onclick="showTab('detect')">Try Detection</button>
+  <button onclick="showTab('livestream')">Live Stream</button>
+  <button onclick="showTab('videoanalysis')">Video Analysis</button>
+  <button onclick="showTab('attendance')">Attendance</button>
+</nav>
+
+<main>
+  <!-- DASHBOARD -->
+  <section id="tab-dashboard">
+    <div class="card">
+      <h2>Live identity status</h2>
+      <div class="row" style="max-width:200px; margin-bottom:10px">
+        <div><label>Camera ID</label><input id="dashCamId" value="101" onchange="loadIdentityStatus()"></div>
+      </div>
+      <div id="statusMsg"></div>
+      <table>
+        <thead><tr><th>Workstation</th><th>Occupancy</th><th>Assigned</th><th>Detected</th><th>Status</th><th>Similarity</th></tr></thead>
+        <tbody id="statusTable"></tbody>
+      </table>
+      <button class="secondary" onclick="loadIdentityStatus()">Refresh</button>
+    </div>
+  </section>
+
+  <!-- WORKSTATIONS -->
+  <section id="tab-workstations" style="display:none">
+    <div class="card">
+      <h2>Draw a workstation ROI</h2>
+      <p class="hint">Upload a snapshot from the camera, then click-drag a rectangle over the desk. Coordinates are saved normalized (0.0–1.0) so the same ROI works regardless of camera resolution.</p>
+      <input type="file" id="roiImageInput" accept="image/*" onchange="loadRoiImage(event)">
+      <br><br>
+      <canvas id="roiCanvas" width="640" height="400"></canvas>
+      <div class="row" style="margin-top:12px">
+        <div><label>Camera ID</label><input id="roiCamId" value="101"></div>
+        <div><label>Workstation name</label><input id="roiName" placeholder="Desk-A"></div>
+      </div>
+      <div id="roiCoordsPreview" class="hint"></div>
+      <button class="primary" onclick="saveWorkstation()">Save workstation</button>
+      <div id="roiMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Saved workstations</h2>
+      <table>
+        <thead><tr><th>Name</th><th>ROI (x1,y1,x2,y2)</th></tr></thead>
+        <tbody id="workstationsTable"></tbody>
+      </table>
+      <button class="secondary" onclick="loadWorkstations()">Refresh</button>
+    </div>
+
+    <div class="card">
+      <h2>Assign an employee to a workstation</h2>
+      <div class="row">
+        <div><label>Workstation name</label><input id="assignWsName" placeholder="Desk-A"></div>
+        <div><label>Employee ID</label><input id="assignEmpId" placeholder="EMP-1001"></div>
+      </div>
+      <button class="primary" onclick="assignEmployee()">Assign</button>
+      <div id="assignMsg"></div>
+    </div>
+  </section>
+
+  <!-- EMPLOYEES -->
+  <section id="tab-employees" style="display:none">
+    <div class="card">
+      <h2>Enroll an employee</h2>
+      <p class="hint">Submit once per view (front / left / right / top) — four calls builds the full gallery entry for one employee, per the dataset structure documented in Section 5.2 of the project documentation.</p>
+      <div class="row">
+        <div><label>Employee ID</label><input id="enrollId" placeholder="EMP-1001"></div>
+        <div><label>Name</label><input id="enrollName" placeholder="Jane Doe"></div>
+        <div><label>View</label>
+          <select id="enrollView"><option>front</option><option>left</option><option>right</option><option>top</option></select>
+        </div>
+      </div>
+      <label style="margin-top:10px">Photo</label>
+      <input type="file" id="enrollPhoto" accept="image/*">
+      <button class="primary" onclick="enrollEmployee()">Enroll this view</button>
+      <div id="enrollMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Bulk enroll from a dataset zip</h2>
+      <p class="hint">For datasets captured at multiple distances (like a calibration shoot). Upload one zip per employee; every view (front/left/right/top) at the closest distance is enrolled immediately, and the zip is kept so "Train model" below can use every distance to fit the distance-matching curve.</p>
+      <div id="zipDistancesWrap"></div>
+      <div class="row" style="margin-top:10px">
+        <div><label>Employee ID</label><input id="zipEmpId" placeholder="EMP-1001"></div>
+        <div><label>Name</label><input id="zipEmpName" placeholder="Jane Doe"></div>
+        <div><label>Department</label><input id="zipEmpDept" placeholder="e.g. Engineering"></div>
+      </div>
+      <label style="margin-top:10px">Employee's zip file</label>
+      <input type="file" id="zipEmpFile" accept=".zip">
+      <p class="hint">Expected folder layout inside the zip (folder name can be anything -- matched to the Employee ID above, not the folder name):</p>
+      <pre id="zipExample">your-upload.zip
+└── &lt;any-folder-name&gt;/
+    ├── depth_000.50m/
+    │   ├── front.jpg
+    │   ├── left.jpg
+    │   ├── right.jpg
+    │   └── top.jpg
+    ├── depth_001m/
+    │   └── ... same 4 files
+    └── depth_002m/
+        └── ... same 4 files</pre>
+      <button class="primary" onclick="enrollEmployeeFromZip()">Enroll this employee</button>
+      <div id="zipEnrollMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Train model</h2>
+      <p class="hint">Fits the distance-matching curve (near_k / near_sigma0) using every employee enrolled via the zip flow above who has 2+ distances. Safe to re-run any time -- e.g. after adding more employees.</p>
+      <button class="primary" onclick="runCalibrationAll()">Train model</button>
+      <div id="trainMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Enrolled employees</h2>
+      <table>
+        <thead><tr><th>Employee ID</th><th>Name</th><th>Department</th><th>Active</th></tr></thead>
+        <tbody id="employeesTable"></tbody>
+      </table>
+      <button class="secondary" onclick="loadEmployees()">Refresh</button>
+    </div>
+
+    <div class="card">
+      <h2>Face recognition readiness check</h2>
+      <p class="hint">Checks whether every active employee has all 4 views enrolled with a real embedding (not just a row that failed silently), and whether every saved workstation actually has someone assigned to it — an unassigned workstation can show a correct detection as MISMATCH, not something more obvious.</p>
+      <button class="primary" onclick="runReadinessCheck()">Run readiness check</button>
+      <div id="readinessMsg" class="hint"></div>
+      <div id="readinessResults" style="display:none; margin-top:10px">
+        <h3 style="font-size:13px; color:var(--slate); margin:14px 0 6px">Employees</h3>
+        <table>
+          <thead><tr><th>Employee</th><th>Views enrolled</th><th>Missing</th><th>Null embedding</th><th>Ready</th></tr></thead>
+          <tbody id="readinessEmployeesTable"></tbody>
+        </table>
+        <h3 style="font-size:13px; color:var(--slate); margin:14px 0 6px">Workstations</h3>
+        <table>
+          <thead><tr><th>Camera</th><th>Workstation</th><th>Assigned to</th></tr></thead>
+          <tbody id="readinessWorkstationsTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- TRY DETECTION -->
+  <section id="tab-detect" style="display:none">
+    <div class="card">
+      <h2>Try it: run real detection on a photo</h2>
+      <p class="hint">Uploads a still image and runs the real YOLO person-detector against your saved ROI, then attempts face matching against enrolled employees. This simulates what a live camera frame would trigger — see backend/app/routers/workstations.py for exactly what runs.</p>
+      <div class="row">
+        <div><label>Camera ID</label><input id="detCamId" value="101"></div>
+        <div><label>Workstation name</label><input id="detWsName" placeholder="Desk-A"></div>
+      </div>
+      <label style="margin-top:10px">Frame / photo</label>
+      <input type="file" id="detFrame" accept="image/*">
+      <button class="primary" onclick="runDetection()">Run detection</button>
+      <div id="detResult"></div>
+    </div>
+  </section>
+
+  <!-- LIVE STREAM -->
+  <section id="tab-livestream" style="display:none">
+    <div class="card">
+      <h2>Start a real stream-processing worker</h2>
+      <p class="hint">Points the real backend at an RTSP URL or a video file path <b>on the server</b> (not a browser upload). It opens the source, runs YOLO occupancy detection on every frame, and identifies people using the event-driven trigger — only on a VACANT→ACTIVE transition or the heartbeat, never every frame. Try <code>../sample_data/demo-camera-feed.mp4</code> to see it work end to end without a real camera.</p>
+      <div class="row">
+        <div><label>Source (RTSP URL or server-side file path)</label><input id="streamSource" value="../sample_data/demo-camera-feed.mp4"></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div><label>Camera ID</label><input id="streamCamId" value="101"></div>
+        <div><label>Max frames (blank = unlimited)</label><input id="streamMaxFrames" placeholder="e.g. 20"></div>
+      </div>
+      <button class="primary" onclick="startStream()">Start stream</button>
+      <div id="streamMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Active streams</h2>
+      <table>
+        <thead><tr><th>Stream ID</th><th>Source</th><th>Alive</th><th>Frames processed</th><th>Opened OK</th><th></th></tr></thead>
+        <tbody id="streamsTable"></tbody>
+      </table>
+      <button class="secondary" onclick="loadStreams()">Refresh</button>
+    </div>
+  </section>
+
+  <!-- VIDEO ANALYSIS -->
+  <section id="tab-videoanalysis" style="display:none">
+    <div class="card">
+      <h2>Upload a video for AI analysis</h2>
+      <p class="hint">Upload a recorded video — this runs through the exact same real-time detection pipeline as a live RTSP camera (see <code>backend/app/routers/streams.py:start_worker</code>, called identically by both). Great for showing a prospect what the system does before they've installed a single camera.</p>
+      <input type="file" id="videoFileInput" accept="video/*" onchange="onVideoFileSelected(event)">
+      <div id="hashCheckMsg" class="hint"></div>
+
+      <div class="card" id="duplicateFoundCard" style="display:none; background:#FFF9EC; border-color:#F5D98E; margin-top:12px">
+        <b>This exact video is already uploaded</b>
+        <p class="hint" style="margin-top:4px">Matched by file content, not just filename — re-uploading it would waste bandwidth and storage for no benefit.</p>
+        <p id="duplicateFoundDetails" style="margin:8px 0; font-size:13px"></p>
+        <button class="primary" onclick="useExistingVideo()">Select this video</button>
+        <button class="secondary" onclick="dismissDuplicateAndUploadAnyway()">Upload as new anyway</button>
+      </div>
+
+      <div class="progress-outer" id="uploadProgressWrap" style="display:none">
+        <div class="progress-inner" id="uploadProgressBar"><span id="uploadProgressLabel">0%</span></div>
+      </div>
+      <div id="uploadMsg"></div>
+
+      <div id="analysisDefaults" style="display:none; margin-top:14px">
+        <p class="hint">Optional — override the defaults below, or leave them and a demo workstation covering the whole frame is created automatically.</p>
+        <div class="row">
+          <div><label>Org ID (optional)</label><input id="vaOrgId" placeholder="default: 1" oninput="previewVideoRoi()"></div>
+          <div><label>Camera ID (optional)</label><input id="vaCamId" placeholder="auto-assigned per video" oninput="previewVideoRoi()"></div>
+          <div><label>User ID (optional)</label><input id="vaUserId" placeholder="default: 1"></div>
+        </div>
+        <div id="vaRoiPreview" class="hint"></div>
+        <button class="primary" id="runAnalysisBtn" onclick="runAiAnalysis()" style="display:none">Run AI Analysis</button>
+      </div>
+    </div>
+
+    <div class="card" id="vaDownloadsCard" style="display:none">
+      <h2>Diagnostics</h2>
+      <p class="hint"><b>Run this first</b> — samples a few frames spread across the whole video (not just the start), runs real detection on each, and reports what YOLO actually found plus how long a full annotated render would take on this server. Takes seconds, not minutes.</p>
+      <div class="row">
+        <div><label>Samples</label><input id="diagSamples" value="8"></div>
+      </div>
+      <button class="secondary" onclick="runDiagnostics()">Run diagnostics</button>
+      <div id="diagMsg" class="hint"></div>
+      <div id="diagResults" style="display:none; margin-top:10px">
+        <table>
+          <tr><td>Frames sampled</td><td id="diagFramesSampled"></td></tr>
+          <tr><td>Video</td><td id="diagVideoInfo"></td></tr>
+          <tr><td>Frames with ≥1 person detected</td><td id="diagFramesWithPerson"></td></tr>
+          <tr><td>Detection confidence (min / mean / max)</td><td id="diagConfidence"></td></tr>
+          <tr><td>Occupancy hits by workstation</td><td id="diagOccupancy"></td></tr>
+          <tr><td>Measured YOLO time per call (this server)</td><td id="diagYoloTime"></td></tr>
+          <tr><td>Estimated full annotate time</td><td id="diagEstimate"></td></tr>
+        </table>
+      </div>
+
+      <h2 style="margin-top:22px">Downloads</h2>
+
+      <p class="hint"><b>Raw clip</b> — just the first N seconds of your uploaded file, no detection. Fast, for reviewing footage.</p>
+      <div class="row">
+        <div><label>Seconds</label><input id="clipSeconds" value="300"></div>
+      </div>
+      <button class="secondary" onclick="downloadClip()">Download clip</button>
+      <div id="clipMsg" class="hint"></div>
+
+      <p class="hint" style="margin-top:18px"><b>Annotated video</b> — runs real detection and draws ROI boxes, detected people, and occupancy/identity status onto the video. CPU-only YOLO inference is slow (see the diagnostics estimate above), so this is capped and blocks until done — don't navigate away while it runs.</p>
+      <div class="row">
+        <div><label>Seconds to process (max 600)</label><input id="annotateSeconds" value="60"></div>
+        <div><label>Run detection every N frames</label><input id="annotateEveryN" value="3"></div>
+      </div>
+      <button class="secondary" onclick="downloadAnnotated()">Generate + download annotated video</button>
+      <div id="annotateMsg" class="hint"></div>
+    </div>
+
+    <div class="card" id="analysisResultsCard" style="display:none">
+      <h2>Live analysis results</h2>
+      <div id="analysisStatusMsg" class="hint"></div>
+      <div class="progress-outer" id="analysisProgressWrap">
+        <div class="progress-inner" id="analysisProgressBar"><span id="analysisProgressLabel">0%</span></div>
+      </div>
+      <p class="hint">Showing the most recent <span id="analysisEventCap">300</span> events — older ones are dropped from view (not from the database) to keep the browser responsive on long videos.</p>
+      <div class="event-log" id="analysisEventLog"></div>
+    </div>
+  </section>
+
+  <!-- ATTENDANCE -->
+  <section id="tab-attendance" style="display:none">
+    <div class="card">
+      <h2>Record a presence detection (demo)</h2>
+      <p class="hint">In production this is called automatically by the stream-processing worker whenever an employee is identity-confirmed on any camera. Exposed here so sign-in/out can be tried without a live pipeline.</p>
+      <div class="row">
+        <div><label>Employee ID</label><input id="attEmpId" placeholder="EMP-1001"></div>
+        <div><label>Location label</label><input id="attLocation" placeholder="Desk-A"></div>
+      </div>
+      <button class="primary" onclick="recordDetection()">Record detection now</button>
+      <div id="attMsg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Today's status</h2>
+      <div class="row">
+        <div><label>Employee ID</label><input id="attCheckEmpId" placeholder="EMP-1001"></div>
+      </div>
+      <button class="secondary" onclick="checkToday()">Check</button>
+      <div id="attToday"></div>
+    </div>
+  </section>
+</main>
+
+<script src="js/log.js"></script>
+<script src="js/api.js"></script>
+<script src="js/tabs/dashboard.js"></script>
+<script src="js/tabs/workstations.js"></script>
+<script src="js/tabs/employees.js"></script>
+<script src="js/tabs/detect.js"></script>
+<script src="js/tabs/livestream.js"></script>
+<script src="js/tabs/videoanalysis.js"></script>
+<script src="js/tabs/attendance.js"></script>
+<script src="js/dashboard.page.js"></script>
+</body>
+</html>
