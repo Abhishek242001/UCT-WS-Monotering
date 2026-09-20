@@ -28,3 +28,22 @@ main{ max-width:1100px; margin:28px auto; padding:0 20px; }
    empty state from looking like a rendering bug rather than "nothing
    has streamed yet". */
 .live-preview:not([src]){ min-height:220px; }
+
+/* Desk status grid (item 9) -- reuses the exact same color tokens as
+   .badge.MATCH/.MISMATCH/.UNKNOWN/.VACANT elsewhere in the app, so a
+   tile's color always means the same thing a badge's color already
+   means, rather than introducing a second, competing color language. */
+.status-grid{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));
+  gap:10px; margin-bottom:14px;
+}
+.status-tile{
+  border:1px solid var(--border); border-left:4px solid var(--slate); border-radius:8px;
+  padding:10px 12px; background:var(--card);
+}
+.status-tile .tile-name{ font-weight:700; font-size:13px; color:var(--navy-deep); margin-bottom:4px; }
+.status-tile .tile-sub{ font-size:11.5px; color:var(--slate); }
+.status-tile.MATCH{ border-left-color:var(--green); background:#F3FBF7; }
+.status-tile.MISMATCH{ border-left-color:var(--amber); background:#FFFAF2; }
+.status-tile.UNKNOWN{ border-left-color:var(--slate); }
+.status-tile.VACANT{ border-left-color:var(--border); }

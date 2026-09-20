@@ -37,11 +37,17 @@
   <!-- DASHBOARD -->
   <section id="tab-dashboard">
     <div class="card">
-      <h2>Live identity status</h2>
+      <h2>Desk status</h2>
+      <p class="hint">A quick glance at every desk on this camera, without opening Live Stream. Colors match the same MATCH/MISMATCH/UNKNOWN badges used throughout the app.</p>
       <div class="row" style="max-width:200px; margin-bottom:10px">
         <div><label>Camera ID</label><input id="dashCamId" value="101" onchange="loadIdentityStatus()"></div>
       </div>
       <div id="statusMsg"></div>
+      <div id="statusGrid" class="status-grid"></div>
+      <button class="secondary" onclick="loadIdentityStatus()">Refresh</button>
+    </div>
+    <div class="card">
+      <h2>Live identity status — detail</h2>
       <table>
         <thead><tr><th>Workstation</th><th>Occupancy</th><th>Assigned</th><th>Detected</th><th>Status</th><th>Similarity</th></tr></thead>
         <tbody id="statusTable"></tbody>
