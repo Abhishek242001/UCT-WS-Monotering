@@ -37,12 +37,14 @@ import os
 import tempfile
 import threading
 import time
+from datetime import datetime
 
 import cv2
 
 from app import database as db_module
 from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEvent, EmployeeFaceGallery, Employee
 from app import logic
+from app.routers import attendance
 from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate, face_crop
 
 HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 60))
@@ -83,7 +85,7 @@ ACTIVITY_MOVING_THRESHOLD_PER_SEC = float(os.environ.get("ACTIVITY_MOVING_THRESH
 class StreamWorker(threading.Thread):
     def __init__(self, source: str, org_id: int, cam_id: int,
                  max_frames: int | None = None, poll_interval_seconds: float = 1.0,
-                 stream_id: str | None = None, loop=None):
+                 stream_id: str | None = None, loop=None, is_live: bool = False):
         super().__init__(daemon=True)
         self.source = source
         self.org_id = org_id
@@ -92,6 +94,20 @@ class StreamWorker(threading.Thread):
         self.poll_interval_seconds = poll_interval_seconds
         self.stream_id = stream_id  # used to route live events via event_bus; None = DB-only, no live push
         self.loop = loop            # the asyncio loop that started this worker, for thread-safe publishing
+        # Gates whether a confirmed MATCH writes a real attendance record
+        # (app/routers/attendance.py record_detection_core). Defaults to
+        # False -- the SAFE default -- because this same StreamWorker
+        # class, via streams.py's start_worker(), is also what Video
+        # Analysis uses to process an uploaded demo file (see that
+        # router's own docstring: "the literal shared code path that
+        # makes 'same as RTSP' true"). Without this flag, analyzing a
+        # demo video would write real EmployeeAttendance/AttendanceSegment
+        # rows -- fabricated sign-in times, fabricated desk time -- into
+        # the exact same tables real attendance reporting reads from.
+        # Only a genuinely live camera stream should ever set this True;
+        # both real call sites (streams.py, videos.py) now do so
+        # explicitly, not by relying on this default.
+        self.is_live = is_live
 
         self._stop_event = threading.Event()
         self.frames_processed = 0
@@ -407,6 +423,25 @@ class StreamWorker(threading.Thread):
                     event_type, detected, similarity, snr, employee_name = self._identify(db, frame, occupying_person, assigned)
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)
                     self._last_employee_name[name] = employee_name
+
+                    # Real attendance recording -- only for a genuinely
+                    # live stream (see self.is_live's docstring in
+                    # __init__), and only on an actual confirmed MATCH,
+                    # never on MISMATCH or UNKNOWN: attendance is about
+                    # tracking a real employee's real presence, not
+                    # logging every inconclusive glance at a desk.
+                    if self.is_live and event_type == "MATCH" and detected:
+                        try:
+                            attendance.record_detection_core(
+                                db, self.org_id, detected, cam_id=self.cam_id,
+                                location=name, timestamp=datetime.utcnow(),
+                            )
+                        except Exception as e:
+                            # Attendance recording must never take down
+                            # the detection loop itself -- a DB hiccup
+                            # here shouldn't stop occupancy/identification
+                            # from continuing to work and being logged.
+                            print(f"[stream_worker] record_detection_core failed for {detected} at {name}: {e}")
                 # else: still occupied, within the current interval -- no
                 # identification call this frame, matching the documented
                 # "tens of calls per day, not per frame" design goal.

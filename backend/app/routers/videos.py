@@ -210,6 +210,8 @@ async def analyze_video(
     try:
         stream_id = streams_router.start_worker(
             source=video["path"], org_id=resolved_org_id, cam_id=resolved_cam_id, loop=loop,
+            is_live=False,  # Video Analysis is a demo/simulation run over an uploaded file --
+                             # must NEVER write real attendance data (see StreamWorker.is_live's docstring)
             max_frames=max_frames, poll_interval_seconds=poll_interval_seconds,
         )
     except ValueError as e:

@@ -54,21 +54,27 @@ def health():
     return {"status": "ok", "service": "workstation-monitoring"}
 
 
-def start_worker(source: str, org_id: int, cam_id: int, loop,
+def start_worker(source: str, org_id: int, cam_id: int, loop, is_live: bool,
                   max_frames: int | None = None, poll_interval_seconds: float = 1.0) -> str:
     """The single real entry point for starting analysis on a video
     source, used identically whether the source is a live RTSP camera or
     an uploaded video file's path -- this is the literal shared code path
     that makes "same as RTSP" true, not just a documentation claim.
     Returns the new stream_id; the worker is already running by the time
-    this returns."""
+    this returns.
+
+    is_live has no required default -- both real callers below pass it
+    explicitly, deliberately, since it gates whether a confirmed MATCH
+    writes a real attendance record (see StreamWorker.is_live's own
+    docstring for why getting this wrong would be a real data-integrity
+    problem, not just a cosmetic one)."""
     if not source.strip():
         raise ValueError("source must not be empty")
     stream_id = str(uuid.uuid4())
     worker = StreamWorker(
         source=source, org_id=org_id, cam_id=cam_id,
         max_frames=max_frames, poll_interval_seconds=poll_interval_seconds,
-        stream_id=stream_id, loop=loop,
+        stream_id=stream_id, loop=loop, is_live=is_live,
     )
     worker.start()
     _workers[stream_id] = worker
@@ -81,8 +87,8 @@ async def start_stream(req: StreamStartRequest, _admin=Depends(require_admin)):
         loop = asyncio.get_running_loop()  # the REAL server event loop, captured here so the
                                             # background worker thread can safely publish live
                                             # events into it via loop.call_soon_threadsafe()
-        stream_id = start_worker(req.source, req.org_id, req.cam_id, loop,
-                                  req.max_frames, req.poll_interval_seconds)
+        stream_id = start_worker(req.source, req.org_id, req.cam_id, loop, is_live=True,
+                                  max_frames=req.max_frames, poll_interval_seconds=req.poll_interval_seconds)
     except ValueError as e:
         raise HTTPException(422, str(e))
     # NOTE: this response previously also included an "hls_url" field

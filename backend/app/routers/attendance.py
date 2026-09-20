@@ -60,37 +60,73 @@ class RecordDetectionRequest(BaseModel):
     timestamp: str | None = None  # ISO datetime; defaults to now
 
 
-@router.post("/attendance/record_detection", status_code=201)
-def record_detection(req: RecordDetectionRequest, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
-    """Not one of the 35 documented public endpoints -- this is the real
-    ingestion point that would normally be called by the stream-processing
-    worker described in Section 3.2 whenever an employee is identity-
-    confirmed at any camera. Exposed directly here so sign-in/out can
-    actually be exercised without a live video pipeline."""
-    verify_org_access(admin, req.org_id)
-    employee = db.get(Employee, req.employee_id)
-    if not employee or employee.org_id != req.org_id:
-        # Without this check, a caller could write an EmployeeAttendance
-        # row scoped to org_id=2 that actually references an employee who
-        # belongs to org 1 -- corrupting data integrity (an attendance
-        # record pointing at someone outside its own org's employee list)
-        # and letting org 2 fabricate presence data for a person who was
-        # never actually theirs to track.
-        raise HTTPException(404, "Employee not found")
+def _close_open_segment_and_open_new(db: Session, org_id: int, employee_id: str, date_str: str,
+                                      cam_id: int | None, location: str, ts: datetime) -> None:
+    """Closes the currently-open segment (if any) before opening a new
+    one -- unless the person is still at the SAME location, in which case
+    the open segment just continues (nothing to do).
 
-    ts = datetime.fromisoformat(req.timestamp) if req.timestamp else datetime.utcnow()
+    Previously, every single call opened a brand-new segment
+    unconditionally, even when the location hadn't changed -- for a
+    person checked every 60 seconds at the same desk, that meant a new
+    micro-segment every minute instead of one continuous one, and
+    end_time/duration_seconds were never set anywhere in the codebase at
+    all: the schema supported per-segment duration, but nothing ever
+    computed it. Fixed by only opening a new segment on a genuine
+    location change, and computing the closed segment's real duration
+    from its own recorded start_time to this new detection's timestamp.
+    """
+    open_segment = (
+        db.query(AttendanceSegment)
+        .filter_by(org_id=org_id, employee_id=employee_id, date=date_str, end_time=None)
+        .order_by(AttendanceSegment.id.desc())
+        .first()
+    )
+    if open_segment and open_segment.department_or_workstation == location:
+        return  # still at the same place -- the open segment just continues
+
+    if open_segment:
+        start_dt = datetime.fromisoformat(f"{date_str}T{open_segment.start_time}")
+        open_segment.end_time = ts.time().isoformat(timespec="seconds")
+        open_segment.duration_seconds = max((ts - start_dt).total_seconds(), 0)
+
+    db.add(AttendanceSegment(org_id=org_id, employee_id=employee_id, date=date_str,
+                              cam_id=cam_id, department_or_workstation=location,
+                              start_time=ts.time().isoformat(timespec="seconds")))
+    db.commit()
+
+
+def record_detection_core(db: Session, org_id: int, employee_id: str, cam_id: int | None = None,
+                           location: str | None = None, timestamp: datetime | None = None) -> EmployeeAttendance | None:
+    """The actual attendance-recording logic, callable directly with a db
+    session -- extracted from the record_detection HTTP handler below so
+    the real stream-processing worker (app/vision/stream_worker.py) can
+    call this SAME logic directly on every confirmed identification,
+    instead of either duplicating it or being unable to call an
+    HTTP-dependency-injected endpoint function from a background thread.
+    Returns None (rather than raising) when the employee doesn't belong
+    to org_id -- callers decide what that means for them (the HTTP
+    endpoint below turns it into a 404; the stream worker just skips
+    silently and logs, since a bad org/employee pairing there is a data
+    problem to notice in logs, not a request to reject).
+    """
+    employee = db.get(Employee, employee_id)
+    if not employee or employee.org_id != org_id:
+        return None
+
+    ts = timestamp or datetime.utcnow()
     date_str = ts.date().isoformat()
 
-    rec = db.query(EmployeeAttendance).filter_by(org_id=req.org_id, employee_id=req.employee_id, date=date_str).first()
+    rec = db.query(EmployeeAttendance).filter_by(org_id=org_id, employee_id=employee_id, date=date_str).first()
     if not rec:
-        rec = EmployeeAttendance(org_id=req.org_id, employee_id=req.employee_id, date=date_str,
+        rec = EmployeeAttendance(org_id=org_id, employee_id=employee_id, date=date_str,
                                   sign_in_time=ts.time().isoformat(timespec="seconds"), status="PRESENT")
         db.add(rec)
     else:
         gap_seconds = (ts - datetime.fromisoformat(f"{date_str}T{rec.last_seen_at.split('T')[-1]}")).total_seconds() \
             if rec.last_seen_at else 0
         current_status = logic.AttendanceStatus(rec.status)
-        break_windows = _current_break_windows(db, req.org_id, req.employee_id, date_str)
+        break_windows = _current_break_windows(db, org_id, employee_id, date_str)
         new_status = logic.next_attendance_status(
             current_status=current_status, detected_now=True, current_time=ts.time(),
             break_windows=break_windows, gap_seconds=max(gap_seconds, 0),
@@ -101,15 +137,35 @@ def record_detection(req: RecordDetectionRequest, db: Session = Depends(get_db),
             rec.sign_out_time = None  # reappeared same day -- clear any prior close-out
 
     rec.last_seen_at = ts.isoformat()
-    rec.last_seen_cam_id = req.cam_id
-    rec.last_seen_workstation = req.location
+    rec.last_seen_cam_id = cam_id
+    rec.last_seen_workstation = location
     db.commit()
 
-    if req.location:
-        db.add(AttendanceSegment(org_id=req.org_id, employee_id=req.employee_id, date=date_str,
-                                  cam_id=req.cam_id, department_or_workstation=req.location,
-                                  start_time=ts.time().isoformat(timespec="seconds")))
-        db.commit()
+    if location:
+        _close_open_segment_and_open_new(db, org_id, employee_id, date_str, cam_id, location, ts)
+
+    return rec
+
+
+@router.post("/attendance/record_detection", status_code=201)
+def record_detection(req: RecordDetectionRequest, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """Not one of the 35 documented public endpoints -- this is the real
+    ingestion point that would normally be called by the stream-processing
+    worker described in Section 3.2 whenever an employee is identity-
+    confirmed at any camera (see record_detection_core, which
+    stream_worker.py now calls directly). Exposed directly here too so
+    sign-in/out can still be exercised without a live video pipeline."""
+    verify_org_access(admin, req.org_id)
+    ts = datetime.fromisoformat(req.timestamp) if req.timestamp else None
+    rec = record_detection_core(db, req.org_id, req.employee_id, req.cam_id, req.location, ts)
+    if rec is None:
+        # Without this check, a caller could write an EmployeeAttendance
+        # row scoped to org_id=2 that actually references an employee who
+        # belongs to org 1 -- corrupting data integrity (an attendance
+        # record pointing at someone outside its own org's employee list)
+        # and letting org 2 fabricate presence data for a person who was
+        # never actually theirs to track.
+        raise HTTPException(404, "Employee not found")
 
     return {"org_id": rec.org_id, "employee_id": rec.employee_id, "date": rec.date,
             "sign_in_time": rec.sign_in_time, "status": rec.status, "last_seen_at": rec.last_seen_at}
@@ -216,6 +272,27 @@ def close_stale_sessions(db: Session = Depends(get_db), admin: AdminSession = De
             rec.day_classification = logic.classify_day(
                 rec.net_present_seconds, full_day_threshold_seconds=7 * 3600, half_day_threshold_seconds=4 * 3600
             ).value
+
+            # Close this employee's final open segment for the day too --
+            # otherwise it stays open forever, since record_detection is
+            # the only other thing that closes a segment, and it's
+            # exactly what's stopped firing for someone now marked
+            # SIGNED_OUT. Uses last_seen_at as the effective end time --
+            # the same timestamp sign_out_time itself is derived from --
+            # since that's the last moment this person was actually
+            # confirmed present, not "now" (which could be arbitrarily
+            # later than when they actually left).
+            open_segment = (
+                db.query(AttendanceSegment)
+                .filter_by(org_id=rec.org_id, employee_id=rec.employee_id, date=rec.date, end_time=None)
+                .order_by(AttendanceSegment.id.desc())
+                .first()
+            )
+            if open_segment:
+                start_dt = datetime.fromisoformat(f"{rec.date}T{open_segment.start_time}")
+                open_segment.end_time = last_seen.time().isoformat(timespec="seconds")
+                open_segment.duration_seconds = max((last_seen - start_dt).total_seconds(), 0)
+
             closed.append(rec.employee_id)
     db.commit()
     return {"closed_count": len(closed), "employee_ids": closed}
