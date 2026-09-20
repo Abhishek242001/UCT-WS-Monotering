@@ -304,15 +304,35 @@ async function loadAnalysisHistory() {
     const body = await api(`/videos/analysis_runs?org_id=${getOrgId()}`);
     const rows = body.runs.map(r => {
       const started = escapeHtml(r.started_at || '').replace('T', ' ').substring(0, 19);
+      const startedDate = (r.started_at || '').substring(0, 10);
       const frames = r.frames_processed != null ? r.frames_processed : '—';
+      const viewBtn = r.status === 'completed'
+        ? `<button class="secondary" style="padding:4px 10px; font-size:11px" onclick="viewRunInAttendance('${startedDate}')">View</button>`
+        : '';
       return `<tr>
         <td>${escapeHtml(r.filename)}</td>
         <td>${escapeHtml(body.org_id)} / ${escapeHtml(r.cam_id)}</td>
         <td>${started}</td>
         <td><span class="badge ${r.status === 'completed' ? 'MATCH' : 'UNKNOWN'}">${escapeHtml(r.status)}</span></td>
         <td>${frames}</td>
+        <td>${viewBtn}</td>
       </tr>`;
     }).join('');
-    document.getElementById('historyTable').innerHTML = rows || '<tr><td colspan="5">No analysis runs yet for this org.</td></tr>';
+    document.getElementById('historyTable').innerHTML = rows || '<tr><td colspan="6">No analysis runs yet for this org.</td></tr>';
   } catch (e) { showMsg('historyMsg', e.message, false); }
+}
+
+function viewRunInAttendance(dateStr) {
+  // Switches to the Attendance tab, sets its data source to Simulated
+  // (this run's results live in the simulated tables, never the real
+  // ones -- see StreamWorker.is_live), and pre-fills the date range to
+  // this run's own date. Employee ID is deliberately left for the admin
+  // to fill in -- a run isn't tied to one specific employee, it may
+  // have identified several.
+  showTab('attendance');
+  document.getElementById('statsSource').value = 'simulated';
+  document.getElementById('statsFrom').value = dateStr;
+  document.getElementById('statsTo').value = dateStr;
+  document.getElementById('timelineDate').value = dateStr;
+  showMsg('statsMsg', `Showing simulated data for ${dateStr} — enter the employee ID this run identified, then Search.`);
 }

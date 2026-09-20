@@ -231,6 +231,28 @@ def attendance_report(org_id: int, employee_id: str, from_: str | None = None, t
     ]}
 
 
+@router.get("/attendance/simulated/report")
+def simulated_attendance_report(org_id: int, employee_id: str, from_: str | None = None, to: str | None = None,
+                                 db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """The Video Analysis counterpart to /attendance/report -- completes
+    simulated-data parity with the real endpoints (today/segments already
+    had counterparts; report didn't yet). Makes a historical Video
+    Analysis run's results actually browsable day-by-day, not just as a
+    single date's segments."""
+    verify_org_access(admin, org_id)
+    q = db.query(SimulatedAttendance).filter_by(org_id=org_id, employee_id=employee_id)
+    if from_:
+        q = q.filter(SimulatedAttendance.date >= from_)
+    if to:
+        q = q.filter(SimulatedAttendance.date <= to)
+    rows = q.order_by(SimulatedAttendance.date).all()
+    return {"employee_id": employee_id, "days": [
+        {"date": r.date, "sign_in_time": r.sign_in_time, "sign_out_time": r.sign_out_time,
+         "net_present_seconds": r.net_present_seconds, "day_classification": r.day_classification,
+         "status": r.status} for r in rows
+    ]}
+
+
 @router.get("/attendance/segments")
 def attendance_segments(org_id: int, employee_id: str, date: str, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
     verify_org_access(admin, org_id)

@@ -38,9 +38,11 @@ async function loadEmployeeStats() {
   try {
     const empId = document.getElementById('statsEmpId').value;
     if (!empId) { showMsg('statsMsg', 'Enter an employee ID first.', false); return; }
+    const source = document.getElementById('statsSource').value;
+    const endpoint = source === 'simulated' ? '/attendance/simulated/report' : '/attendance/report';
     const from = document.getElementById('statsFrom').value;
     const to = document.getElementById('statsTo').value;
-    let url = `/attendance/report?org_id=${getOrgId()}&employee_id=${encodeURIComponent(empId)}`;
+    let url = `${endpoint}?org_id=${getOrgId()}&employee_id=${encodeURIComponent(empId)}`;
     if (from) url += `&from_=${from}`;
     if (to) url += `&to=${to}`;
     const body = await api(url);
@@ -78,7 +80,9 @@ async function loadDailyTimeline() {
     const empId = document.getElementById('statsEmpId').value;
     const date = document.getElementById('timelineDate').value;
     if (!empId || !date) { showMsg('timelineMsg', 'Enter an employee ID above and pick a date first.', false); return; }
-    const body = await api(`/attendance/segments?org_id=${getOrgId()}&employee_id=${encodeURIComponent(empId)}&date=${date}`);
+    const source = document.getElementById('statsSource').value;
+    const endpoint = source === 'simulated' ? '/attendance/simulated/segments' : '/attendance/segments';
+    const body = await api(`${endpoint}?org_id=${getOrgId()}&employee_id=${encodeURIComponent(empId)}&date=${date}`);
     const segs = body.segments;
     document.getElementById('timelineMsg').innerHTML = '';
     if (!segs.length) {

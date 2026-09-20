@@ -307,10 +307,10 @@
 
     <div class="card">
       <h2>Past analysis runs</h2>
-      <p class="hint">A real record of past runs — which video, when, on which org/camera. Results from a completed run live in the Attendance tab's simulated tables, kept fully separate from real attendance (see <code>/attendance/simulated/segments</code>) — use the org and date shown here to look one up for a specific employee.</p>
+      <p class="hint">A real record of past runs — which video, when, on which org/camera. Click "View" on a completed run to jump to its results in the Attendance tab's simulated data (kept fully separate from real attendance).</p>
       <div id="historyMsg"></div>
       <table>
-        <thead><tr><th>Video</th><th>Org / Cam</th><th>Started</th><th>Status</th><th>Frames</th></tr></thead>
+        <thead><tr><th>Video</th><th>Org / Cam</th><th>Started</th><th>Status</th><th>Frames</th><th></th></tr></thead>
         <tbody id="historyTable"></tbody>
       </table>
       <button class="secondary" onclick="loadAnalysisHistory()">Refresh</button>
@@ -330,6 +330,12 @@
     <div class="card">
       <h2>Employee stats</h2>
       <div class="row">
+        <div><label>Data source</label>
+          <select id="statsSource" onchange="loadEmployeeStats()">
+            <option value="real">Real (live)</option>
+            <option value="simulated">Simulated (Video Analysis)</option>
+          </select>
+        </div>
         <div><label>Employee ID</label><input id="statsEmpId" placeholder="EMP-1001"></div>
         <div><label>From date</label><input id="statsFrom" type="date"></div>
         <div><label>To date</label><input id="statsTo" type="date"></div>
@@ -346,7 +352,7 @@
 
     <div class="card">
       <h2>Daily timeline</h2>
-      <p class="hint">Desk time vs. time in the room but not at a desk vs. away/untracked, for one date. Empty space in the bar means no segment was recorded for that stretch of time.</p>
+      <p class="hint">Desk time vs. time in the room but not at a desk vs. away/untracked, for one date. Empty space in the bar means no segment was recorded for that stretch of time. Uses the same data source (Real/Simulated) selected above.</p>
       <div class="row" style="max-width:200px">
         <div><label>Date</label><input id="timelineDate" type="date"></div>
       </div>
