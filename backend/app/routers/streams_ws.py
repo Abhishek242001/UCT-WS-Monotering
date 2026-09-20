@@ -86,32 +86,60 @@ async def stream_analysis_ws(websocket: WebSocket, stream_id: str, token: str = 
             })
             return
 
-        while True:
-            get_message = asyncio.ensure_future(queue.get())
-            disconnect_watch = asyncio.ensure_future(websocket.receive_text())
-            done, pending = await asyncio.wait(
-                {get_message, disconnect_watch}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-
-            if disconnect_watch in done:
-                try:
-                    disconnect_watch.result()  # raises WebSocketDisconnect if the client closed
-                except WebSocketDisconnect:
-                    logger.info("[%s] Client disconnected from stream %s", session.username, stream_id)
-                    break
-                except Exception:
-                    pass  # a stray non-disconnect message from the client -- ignore and keep relaying
-                continue
-
-            message = get_message.result()
-            await websocket.send_json(message)
-            if message.get("type") == "completed":
-                break
+        # Two long-lived tasks, raced ONCE for the life of the connection
+        # -- not recreated on every message. The earlier version created
+        # and cancelled a fresh websocket.receive_text() future on every
+        # single relayed message; that was fine while messages were rare
+        # JSON events (roughly one per 30s heartbeat), but once the live
+        # "frame" preview started pushing larger base64-JPEG payloads up
+        # to several times a second, send_json() started taking long
+        # enough (especially over a real, non-loopback connection) that
+        # cancelling an in-flight receive_text() on almost every loop
+        # iteration could race the websockets library's own background
+        # keepalive ping -- observed in production as "keepalive ping
+        # failed" / AssertionError in _drain_helper. Racing two
+        # persistent tasks instead means cancellation happens once, at
+        # actual teardown, not dozens of times a second during normal
+        # operation.
+        relay_task = asyncio.ensure_future(_relay_queue_to_client(websocket, queue))
+        disconnect_task = asyncio.ensure_future(_watch_for_disconnect(websocket))
+        done, pending = await asyncio.wait(
+            {relay_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            exc = task.exception()
+            if exc:
+                raise exc
     except WebSocketDisconnect:
         logger.info("[%s] Client disconnected from stream %s", session.username, stream_id)
     except Exception:
         logger.exception("[%s] Unexpected error in stream %s WebSocket", session.username, stream_id)
     finally:
         event_bus.unregister(stream_id)
+
+
+async def _relay_queue_to_client(websocket: WebSocket, queue: asyncio.Queue) -> None:
+    """Runs for the life of the connection: sends every queued message as
+    it arrives, returning normally right after relaying a "completed"
+    message (the worker's own signal that there is nothing more to
+    send)."""
+    while True:
+        message = await queue.get()
+        await websocket.send_json(message)
+        if message.get("type") == "completed":
+            return
+
+
+async def _watch_for_disconnect(websocket: WebSocket) -> None:
+    """Runs for the life of the connection: does nothing with what the
+    client sends (this endpoint is server->client push only), just
+    returns the moment the client disconnects. A stray non-disconnect
+    message from the client is ignored and this keeps watching, matching
+    the original loop's behavior."""
+    while True:
+        try:
+            await websocket.receive_text()
+        except WebSocketDisconnect:
+            return
