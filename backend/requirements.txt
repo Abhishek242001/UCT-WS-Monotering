@@ -11,6 +11,7 @@ numpy>=1.26
 scipy>=1.11
 opencv-python-headless>=4.9
 ultralytics>=8.3
+lap>=0.5.12  # required by Ultralytics' ByteTrack tracker (model.track()); without this pinned, it silently auto-installs at runtime on first use
 
 # Face recognition (previously a separate opt-in file,
 # requirements-face-recognition.txt -- merged in here on request so a

@@ -8,7 +8,7 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
-os.environ.setdefault("YOLO_MODEL_PATH", str(BACKEND_DIR / "yolov8n.pt"))  # reuse the bundled weight, no re-download
+os.environ.setdefault("YOLO_MODEL_PATH", str(BACKEND_DIR / "yolov8n-pose.pt"))  # reuse the bundled weight, no re-download -- switched from the plain (detection-only) yolov8n.pt now that yolo_detector.py uses a pose model for tracking + activity keypoints
 
 # Import the app and its submodules exactly ONCE for the whole test
 # session, so heavy singletons (the YOLO model, and InsightFace if

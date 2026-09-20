@@ -94,6 +94,15 @@ class StreamWorker(threading.Thread):
             self._publish({"type": "completed", "frames_processed": 0, "reason": "source_not_opened"})
             return
 
+        # A model instance PRIVATE to this worker/this one video source --
+        # never the shared yolo_detector.get_model() singleton -- so this
+        # stream's tracker state (assigned track IDs, motion history)
+        # never collides with another concurrent or sequential stream's.
+        # Allocated only once the source is confirmed open, so a bad
+        # source URL doesn't pay a model-load cost for nothing. See
+        # yolo_detector.new_model_instance()'s docstring.
+        pose_model = yolo_detector.new_model_instance()
+
         db = db_module.SessionLocal()
         try:
             rois = self._load_rois(db)
@@ -112,7 +121,7 @@ class StreamWorker(threading.Thread):
                     time.sleep(0.2)
                     continue
                 consecutive_failures = 0
-                self._process_frame(db, frame, rois)
+                self._process_frame(db, frame, rois, pose_model)
                 self.frames_processed += 1
                 self._publish({"type": "progress", "frames_processed": self.frames_processed,
                                 "total_frames": total_frames or None})
@@ -240,13 +249,13 @@ class StreamWorker(threading.Thread):
             detected_employee_id = None
         return status.value, detected_employee_id, similarity, snr
 
-    def _process_frame(self, db, frame, rois: dict[str, dict]):
+    def _process_frame(self, db, frame, rois: dict[str, dict], pose_model):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             cv2.imwrite(tmp.name, frame)
             tmp_path = tmp.name
 
         try:
-            people = yolo_detector.detect_people(tmp_path)
+            people = yolo_detector.detect_and_track_people(pose_model, tmp_path)
             now = time.monotonic()
 
             for name, roi in rois.items():
