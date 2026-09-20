@@ -1,0 +1,12 @@
+# Test logs saved with: pytest ... 2>&1 | tee logs/<item>.txt
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local secrets and databases
+.env
+*.db
+*.sqlite3

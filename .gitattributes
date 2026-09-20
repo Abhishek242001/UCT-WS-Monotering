@@ -1,0 +1,12 @@
+# Store text as LF in the repo regardless of OS (Windows checkouts stop
+# warning "LF will be replaced by CRLF", and .sh scripts stay runnable on
+# the Lightning/Linux studio).
+* text=auto eol=lf
+
+# Never touch binaries.
+*.pt   binary
+*.png  binary
+*.jpg  binary
+*.mp4  binary
+*.docx binary
+*.zip  binary
