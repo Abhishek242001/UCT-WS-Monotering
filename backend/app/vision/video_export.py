@@ -292,6 +292,8 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
     last_identify_time: dict[str, float] = {}
     last_employee_name: dict[str, str | None] = {}  # name -> employee_name, paired with last_result
     last_identity_by_track: dict[int, tuple] = {}  # track_id -> (event_type, detected_employee_id, employee_name, similarity)
+    pending_status: dict[str, str] = {}      # item 13: occupancy hysteresis state, same shared algorithm as stream_worker.py
+    pending_status_count: dict[str, int] = {}
     last_people = []
     frame_idx = 0
     start = time.monotonic()
@@ -325,12 +327,17 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
                     for name, roi in rois.items():
                         occupying_person = face_crop.best_overlapping_person(last_people, roi)
                         occupied = occupying_person is not None
-                        new_status = "ACTIVE" if occupied else "VACANT"
+                        raw_status = "ACTIVE" if occupied else "VACANT"
                         previous_status = last_status.get(name)
-                        last_status[name] = new_status
-                        if not occupied:
+                        new_status = logic.apply_occupancy_hysteresis(
+                            last_status, pending_status, pending_status_count,
+                            name, raw_status, logic.OCCUPANCY_HYSTERESIS_FRAMES,
+                        )
+                        if new_status == "VACANT":
                             last_result[name] = ("VACANT", None, None)
                             continue
+                        if occupying_person is None:
+                            continue  # committed ACTIVE (hysteresis), but no one detected THIS frame -- nothing to identify
                         assigned = _assigned_employee(db, org_id, cam_id, name)
                         became_active = previous_status != "ACTIVE"
                         heartbeat_due = (now - last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS

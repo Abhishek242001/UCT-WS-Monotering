@@ -345,3 +345,73 @@ def activity_inputs_from_coco_keypoints(keypoints: dict) -> tuple[dict, float]:
     dy = hip_y - shoulder_y
     torso_angle_deg = math.degrees(math.atan2(dx, dy)) if (dx or dy) else 0.0
     return keypoint_confidence, torso_angle_deg
+
+
+# ---------------------------------------------------------------------------
+# Item 13: the original flicker issue this whole project's most recent
+# round of work started from. Occupancy itself -- not just identity
+# matching -- was observed flipping VACANT/ACTIVE rapidly frame to frame
+# on real footage. A pure, shared state-transition function here (rather
+# than duplicated logic in both stream_worker.py and video_export.py, the
+# same two places every other per-frame concern in this project has
+# needed keeping in sync) so both the live pipeline and the downloaded-
+# video export get identical, single-tested debounce behavior.
+# ---------------------------------------------------------------------------
+
+# Requires this many CONSECUTIVE calls with a new raw status before it's
+# committed as a real transition; a flip that reverts before reaching
+# this doesn't count at all. Documented placeholder, not tuned against
+# real footage yet -- 3 is a reasonable starting point, not a measured
+# constant. Lives here (not in stream_worker.py) so both stream_worker.py
+# and video_export.py -- the two places occupancy is computed -- use the
+# exact same value without one importing a constant from the other.
+OCCUPANCY_HYSTERESIS_FRAMES = int(__import__("os").environ.get("OCCUPANCY_HYSTERESIS_FRAMES", 3))
+
+
+def apply_occupancy_hysteresis(committed: dict, pending: dict, pending_count: dict,
+                                key, raw_status: str, hysteresis_frames: int) -> str:
+    """Returns the COMMITTED status for `key` (a workstation name) --
+    which only changes once raw_status has held consistently for
+    hysteresis_frames consecutive calls, filtering out single-frame
+    flips. A flip that reverts before reaching the threshold doesn't
+    count at all and doesn't affect the committed status.
+
+    `committed`, `pending`, `pending_count` are the caller's own state
+    dicts, keyed by `key`, mutated in place -- this function has no
+    dependency on where that state actually lives (a StreamWorker
+    instance's attributes, or a batch video export's local variables),
+    only that the SAME three dicts are passed on every call for the same
+    logical stream of frames.
+
+    The very first observation for a key commits immediately -- there's
+    no prior committed state to protect from flicker yet, and delaying
+    the first ever ACTIVE/VACANT read would only add startup latency for
+    no real benefit.
+    """
+    current = committed.get(key)
+    if current is None:
+        committed[key] = raw_status
+        pending[key] = raw_status
+        pending_count[key] = 1
+        return raw_status
+
+    if raw_status == current:
+        # Either genuinely stable, or a pending flip attempt just
+        # reverted back to the committed status before reaching
+        # threshold -- either way, reset the pending tracker so a LATER
+        # flip attempt has to start counting from zero again, not
+        # continue an old, already-abandoned attempt.
+        pending[key] = raw_status
+        pending_count[key] = 1
+        return current
+
+    if pending.get(key) == raw_status:
+        pending_count[key] = pending_count.get(key, 0) + 1
+    else:
+        pending[key] = raw_status
+        pending_count[key] = 1
+
+    if pending_count[key] >= hysteresis_frames:
+        committed[key] = raw_status
+        return raw_status
+    return current  # not yet consistent enough to commit -- keep reporting the old status

@@ -60,6 +60,12 @@ HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 60))
 # retry actually resolves an UNKNOWN vs. just repeating it.
 LOW_CONFIDENCE_RETRY_SECONDS = int(os.environ.get("IDENTIFY_LOW_CONFIDENCE_RETRY_SECONDS", 5))
 
+# Item 13's OCCUPANCY_HYSTERESIS_FRAMES now lives in logic.py, alongside
+# logic.apply_occupancy_hysteresis() itself -- imported below as
+# logic.OCCUPANCY_HYSTERESIS_FRAMES -- so stream_worker.py and
+# video_export.py (the two places occupancy is computed) share the exact
+# same constant without one importing it from the other.
+
 # Sentinel location value for AttendanceSegment rows representing "in the
 # room, but not at any specific workstation" (you confirmed "in the room"
 # means anywhere in this camera's frame). Distinguishes this from a real
@@ -131,6 +137,8 @@ class StreamWorker(threading.Thread):
         self._last_identity_by_track: dict[int, tuple] = {}  # track_id -> (event_type, detected_employee_id, employee_name, similarity), so a person's own box label follows them, not their workstation's rectangle
         self._last_employee_name: dict[str, str | None] = {}  # workstation_name -> employee_name from the most recent MATCH/MISMATCH, paired with _last_result
         self._last_room_record_time: dict[int, float] = {}  # track_id -> monotonic time, heartbeat for "in room, not at desk" attendance segments
+        self._pending_occupancy: dict[str, str] = {}       # workstation_name -> raw status currently being tracked toward a hysteresis commit
+        self._pending_occupancy_count: dict[str, int] = {}  # workstation_name -> consecutive frames the pending status has held
 
     def stop(self):
         self._stop_event.set()
@@ -425,6 +433,17 @@ class StreamWorker(threading.Thread):
             except Exception as e:
                 print(f"[stream_worker] room-presence recording failed for {detected_employee_id}: {e}")
 
+    def _apply_occupancy_hysteresis(self, workstation_name: str, raw_status: str) -> str:
+        """Thin wrapper around the shared logic.apply_occupancy_hysteresis()
+        (item 13) -- see that function's docstring for the actual
+        algorithm and reasoning. Kept as a method here only so call sites
+        below don't need to pass this worker's three state dicts by hand
+        every time."""
+        return logic.apply_occupancy_hysteresis(
+            self._last_occupancy, self._pending_occupancy, self._pending_occupancy_count,
+            workstation_name, raw_status, logic.OCCUPANCY_HYSTERESIS_FRAMES,
+        )
+
     def _process_frame(self, db, frame, rois: dict[str, dict], pose_model):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             cv2.imwrite(tmp.name, frame)
@@ -447,15 +466,15 @@ class StreamWorker(threading.Thread):
                 occupied = occupying_person is not None
                 if occupied and occupying_person.track_id is not None:
                     occupied_track_ids.add(occupying_person.track_id)
-                new_status = "ACTIVE" if occupied else "VACANT"
+                raw_status = "ACTIVE" if occupied else "VACANT"
                 previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
-                self._last_occupancy[name] = new_status
+                new_status = self._apply_occupancy_hysteresis(name, raw_status)
                 assigned = self._assigned_employee(db, name)
 
-                status_changed = previous_status != new_status  # True on the first frame too
+                status_changed = previous_status != new_status  # True only on a genuinely COMMITTED transition (or the first frame), not every raw flip
                 heartbeat_due = (now - self._last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
 
-                if not occupied:
+                if new_status == "VACANT":
                     # Previously wrote+published a VACANT event on EVERY
                     # not-occupied frame, with no de-duplication -- for a
                     # multi-minute video at poll_interval_seconds=0 this
@@ -468,6 +487,18 @@ class StreamWorker(threading.Thread):
                         self._last_identify_time[name] = now
                         self._write_event(db, name, "VACANT", assigned, None, None, None)
                     continue
+
+                if occupying_person is None:
+                    # Committed status is still ACTIVE (hysteresis hasn't
+                    # let a momentary empty frame flip it to VACANT yet
+                    # -- e.g. a brief occlusion), but there is genuinely
+                    # no one to crop/identify THIS specific frame. Keep
+                    # reporting ACTIVE (the desk still reads as occupied,
+                    # correctly, since the person hasn't actually left
+                    # long enough to count), just skip identification
+                    # until a real detection reappears.
+                    continue
+
 
                 # Event-driven identification trigger (Section 3.2): fire
                 # on a VACANT -> ACTIVE transition, or on a heartbeat
