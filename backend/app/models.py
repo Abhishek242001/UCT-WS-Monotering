@@ -219,6 +219,59 @@ class AttendanceSegment(Base):
     duration_seconds = Column(Float)
 
 
+class SimulatedAttendance(Base):
+    """Item 8: Video Analysis' own attendance table -- structurally
+    identical to EmployeeAttendance, but a genuinely separate table, not
+    a shared one with a discriminator column. That choice was deliberate,
+    not just for cleanliness: this project has no migration framework at
+    all (app/database.py only ever calls Base.metadata.create_all(),
+    which creates NEW tables but never alters an EXISTING one), so adding
+    a column + widening a UniqueConstraint on EmployeeAttendance -- a
+    table your real deployment may already have real rows in -- would
+    silently do nothing to your actual database file and then fail with
+    "no such column" the first time it was touched. A brand-new table
+    carries none of that risk: create_all() creates it cleanly regardless
+    of what already exists.
+
+    Populated only by a Video Analysis run (StreamWorker.is_live=False)
+    via record_simulated_detection_core() -- never by a live camera
+    stream, and a live stream's real EmployeeAttendance is never written
+    here either. Two fully separate, non-overlapping paths."""
+    __tablename__ = "simulated_attendance"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, nullable=False)
+    employee_id = Column(String, ForeignKey("employees.employee_id"), nullable=False)
+    date = Column(String, nullable=False)
+    sign_in_time = Column(String)
+    sign_out_time = Column(String)
+    last_seen_at = Column(String)
+    last_seen_cam_id = Column(Integer)
+    last_seen_workstation = Column(String)
+    status = Column(String, nullable=False, default="PRESENT")
+    net_present_seconds = Column(Integer)
+    day_classification = Column(String)
+    __table_args__ = (
+        UniqueConstraint("org_id", "employee_id", "date"),
+        CheckConstraint("status IN ('PRESENT','ON_BREAK','SIGNED_OUT')"),
+    )
+
+
+class SimulatedAttendanceSegment(Base):
+    """Video Analysis' own segment table -- see SimulatedAttendance's
+    docstring for why this is a separate table rather than a shared one
+    with a discriminator column."""
+    __tablename__ = "simulated_attendance_segments"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, nullable=False)
+    employee_id = Column(String, ForeignKey("employees.employee_id"), nullable=False)
+    date = Column(String, nullable=False)
+    cam_id = Column(Integer)
+    department_or_workstation = Column(String)
+    start_time = Column(String)
+    end_time = Column(String)
+    duration_seconds = Column(Float)
+
+
 class Shift(Base):
     __tablename__ = "shifts"
     shift_id = Column(String, primary_key=True)

@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import (
-    EmployeeAttendance, AttendanceSegment, AttendanceException, Employee,
-    EmployeeShiftAssignment, BreakSchedule, AdminSession,
+    EmployeeAttendance, AttendanceSegment, SimulatedAttendance, SimulatedAttendanceSegment,
+    AttendanceException, Employee, EmployeeShiftAssignment, BreakSchedule, AdminSession,
 )
 from app import logic
 from app.routers.admin_auth import require_admin, verify_org_access
@@ -31,7 +31,9 @@ def _current_break_windows(db: Session, org_id: int, employee_id: str, on_date: 
     reached through this endpoint even though shifts/break_schedules had
     working CRUD and the state-machine logic itself was fully correct and
     tested -- a real gap between what the schema/logic supported and what
-    was actually wired up."""
+    was actually wired up. Shared by both the real and simulated paths --
+    shift/break config isn't something Video Analysis needs its own copy
+    of, only the resulting attendance/segment DATA is kept separate."""
     assignment = (
         db.query(EmployeeShiftAssignment)
         .filter(
@@ -60,7 +62,7 @@ class RecordDetectionRequest(BaseModel):
     timestamp: str | None = None  # ISO datetime; defaults to now
 
 
-def _close_open_segment_and_open_new(db: Session, org_id: int, employee_id: str, date_str: str,
+def _close_open_segment_and_open_new(db: Session, SegmentModel, org_id: int, employee_id: str, date_str: str,
                                       cam_id: int | None, location: str, ts: datetime) -> None:
     """Closes the currently-open segment (if any) before opening a new
     one -- unless the person is still at the SAME location, in which case
@@ -75,11 +77,16 @@ def _close_open_segment_and_open_new(db: Session, org_id: int, employee_id: str,
     computed it. Fixed by only opening a new segment on a genuine
     location change, and computing the closed segment's real duration
     from its own recorded start_time to this new detection's timestamp.
+
+    SegmentModel is either AttendanceSegment (real) or
+    SimulatedAttendanceSegment (Video Analysis) -- see
+    models.SimulatedAttendance's docstring for why these are separate
+    tables rather than one table with a discriminator column.
     """
     open_segment = (
-        db.query(AttendanceSegment)
+        db.query(SegmentModel)
         .filter_by(org_id=org_id, employee_id=employee_id, date=date_str, end_time=None)
-        .order_by(AttendanceSegment.id.desc())
+        .order_by(SegmentModel.id.desc())
         .first()
     )
     if open_segment and open_segment.department_or_workstation == location:
@@ -90,25 +97,22 @@ def _close_open_segment_and_open_new(db: Session, org_id: int, employee_id: str,
         open_segment.end_time = ts.time().isoformat(timespec="seconds")
         open_segment.duration_seconds = max((ts - start_dt).total_seconds(), 0)
 
-    db.add(AttendanceSegment(org_id=org_id, employee_id=employee_id, date=date_str,
-                              cam_id=cam_id, department_or_workstation=location,
-                              start_time=ts.time().isoformat(timespec="seconds")))
+    db.add(SegmentModel(org_id=org_id, employee_id=employee_id, date=date_str,
+                         cam_id=cam_id, department_or_workstation=location,
+                         start_time=ts.time().isoformat(timespec="seconds")))
     db.commit()
 
 
-def record_detection_core(db: Session, org_id: int, employee_id: str, cam_id: int | None = None,
-                           location: str | None = None, timestamp: datetime | None = None) -> EmployeeAttendance | None:
-    """The actual attendance-recording logic, callable directly with a db
-    session -- extracted from the record_detection HTTP handler below so
-    the real stream-processing worker (app/vision/stream_worker.py) can
-    call this SAME logic directly on every confirmed identification,
-    instead of either duplicating it or being unable to call an
-    HTTP-dependency-injected endpoint function from a background thread.
-    Returns None (rather than raising) when the employee doesn't belong
-    to org_id -- callers decide what that means for them (the HTTP
-    endpoint below turns it into a 404; the stream worker just skips
-    silently and logs, since a bad org/employee pairing there is a data
-    problem to notice in logs, not a request to reject).
+def _record_detection_impl(db: Session, AttendanceModel, SegmentModel, org_id: int, employee_id: str,
+                            cam_id: int | None, location: str | None, timestamp: datetime | None):
+    """The real attendance-recording logic, parameterized over which pair
+    of tables to write to -- (EmployeeAttendance, AttendanceSegment) for a
+    real live stream, or (SimulatedAttendance, SimulatedAttendanceSegment)
+    for a Video Analysis run (item 8). Same state-machine logic either
+    way; only the destination tables differ, which is exactly what keeps
+    a demo run from ever being able to write into, or collide with, real
+    attendance data -- they are different tables, not the same rows
+    tagged differently.
     """
     employee = db.get(Employee, employee_id)
     if not employee or employee.org_id != org_id:
@@ -117,10 +121,10 @@ def record_detection_core(db: Session, org_id: int, employee_id: str, cam_id: in
     ts = timestamp or datetime.utcnow()
     date_str = ts.date().isoformat()
 
-    rec = db.query(EmployeeAttendance).filter_by(org_id=org_id, employee_id=employee_id, date=date_str).first()
+    rec = db.query(AttendanceModel).filter_by(org_id=org_id, employee_id=employee_id, date=date_str).first()
     if not rec:
-        rec = EmployeeAttendance(org_id=org_id, employee_id=employee_id, date=date_str,
-                                  sign_in_time=ts.time().isoformat(timespec="seconds"), status="PRESENT")
+        rec = AttendanceModel(org_id=org_id, employee_id=employee_id, date=date_str,
+                               sign_in_time=ts.time().isoformat(timespec="seconds"), status="PRESENT")
         db.add(rec)
     else:
         gap_seconds = (ts - datetime.fromisoformat(f"{date_str}T{rec.last_seen_at.split('T')[-1]}")).total_seconds() \
@@ -142,9 +146,33 @@ def record_detection_core(db: Session, org_id: int, employee_id: str, cam_id: in
     db.commit()
 
     if location:
-        _close_open_segment_and_open_new(db, org_id, employee_id, date_str, cam_id, location, ts)
+        _close_open_segment_and_open_new(db, SegmentModel, org_id, employee_id, date_str, cam_id, location, ts)
 
     return rec
+
+
+def record_detection_core(db: Session, org_id: int, employee_id: str, cam_id: int | None = None,
+                           location: str | None = None, timestamp: datetime | None = None) -> EmployeeAttendance | None:
+    """REAL attendance -- callable directly with a db session, extracted
+    so app/vision/stream_worker.py can call this on every confirmed
+    identification from a genuinely live stream (StreamWorker.is_live is
+    True). Returns None (rather than raising) when the employee doesn't
+    belong to org_id -- callers decide what that means for them (the
+    HTTP endpoint below turns it into a 404; the stream worker just skips
+    silently and logs)."""
+    return _record_detection_impl(db, EmployeeAttendance, AttendanceSegment, org_id, employee_id, cam_id, location, timestamp)
+
+
+def record_simulated_detection_core(db: Session, org_id: int, employee_id: str, cam_id: int | None = None,
+                                     location: str | None = None, timestamp: datetime | None = None) -> SimulatedAttendance | None:
+    """Item 8: Video Analysis' own attendance recording -- same logic as
+    record_detection_core, but writes to SimulatedAttendance /
+    SimulatedAttendanceSegment instead. Called by stream_worker.py when
+    StreamWorker.is_live is False, so an uploaded demo video produces
+    something viewable ("a glimpse of the software", per your own
+    description of what Video Analysis is for) without ever touching a
+    single row of real attendance data."""
+    return _record_detection_impl(db, SimulatedAttendance, SimulatedAttendanceSegment, org_id, employee_id, cam_id, location, timestamp)
 
 
 @router.post("/attendance/record_detection", status_code=201)
@@ -154,7 +182,10 @@ def record_detection(req: RecordDetectionRequest, db: Session = Depends(get_db),
     worker described in Section 3.2 whenever an employee is identity-
     confirmed at any camera (see record_detection_core, which
     stream_worker.py now calls directly). Exposed directly here too so
-    sign-in/out can still be exercised without a live video pipeline."""
+    sign-in/out can still be exercised without a live video pipeline.
+    Always writes REAL attendance -- there is no is_live concept at the
+    HTTP layer, only in the stream worker; a caller of this endpoint is
+    always claiming a real detection happened."""
     verify_org_access(admin, req.org_id)
     ts = datetime.fromisoformat(req.timestamp) if req.timestamp else None
     rec = record_detection_core(db, req.org_id, req.employee_id, req.cam_id, req.location, ts)
@@ -210,6 +241,35 @@ def attendance_segments(org_id: int, employee_id: str, date: str, db: Session = 
     ]}
 
 
+@router.get("/attendance/simulated/today")
+def simulated_attendance_today(org_id: int, employee_id: str, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """Item 8: the Video Analysis counterpart to /attendance/today --
+    reads SimulatedAttendance, never the real EmployeeAttendance table.
+    "Today" here means the demo video's own detected timestamps, which
+    may not correspond to when the video was actually uploaded/analyzed
+    (a video can be analyzed at any real time; the simulated dates
+    reflect whatever timestamps the frames were processed under)."""
+    verify_org_access(admin, org_id)
+    today = datetime.utcnow().date().isoformat()
+    rec = db.query(SimulatedAttendance).filter_by(org_id=org_id, employee_id=employee_id, date=today).first()
+    if not rec:
+        raise HTTPException(404, "No simulated attendance record for today")
+    return {"org_id": rec.org_id, "employee_id": rec.employee_id, "date": rec.date,
+            "sign_in_time": rec.sign_in_time, "sign_out_time": rec.sign_out_time, "status": rec.status,
+            "last_seen_at": rec.last_seen_at, "last_seen_workstation": rec.last_seen_workstation}
+
+
+@router.get("/attendance/simulated/segments")
+def simulated_attendance_segments(org_id: int, employee_id: str, date: str, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """Item 8: the Video Analysis counterpart to /attendance/segments."""
+    verify_org_access(admin, org_id)
+    rows = db.query(SimulatedAttendanceSegment).filter_by(org_id=org_id, employee_id=employee_id, date=date).all()
+    return {"employee_id": employee_id, "date": date, "segments": [
+        {"cam_id": r.cam_id, "location": r.department_or_workstation, "start_time": r.start_time,
+         "end_time": r.end_time, "duration_seconds": r.duration_seconds} for r in rows
+    ]}
+
+
 class ExceptionRequest(BaseModel):
     org_id: int
     employee_id: str
@@ -254,7 +314,12 @@ def close_stale_sessions(db: Session = Depends(get_db), admin: AdminSession = De
     Restricted to SUPER_ADMIN: this sweeps every org's records in one
     pass, which is exactly the kind of genuinely cross-tenant operation
     verify_org_access() can't (and shouldn't) authorize an ordinary
-    org-scoped HR_ADMIN for."""
+    org-scoped HR_ADMIN for.
+
+    Only sweeps REAL attendance (EmployeeAttendance) -- a Video Analysis
+    run is a short, bounded, already-finished process by the time anyone
+    would call this; there's no "stale" simulated session to close in the
+    same away-timeout sense a real all-day live stream has."""
     if admin.role != "SUPER_ADMIN":
         raise HTTPException(403, "Only a SUPER_ADMIN account can run this system-wide maintenance operation")
     now = datetime.utcnow()

@@ -101,19 +101,22 @@ class StreamWorker(threading.Thread):
         self.poll_interval_seconds = poll_interval_seconds
         self.stream_id = stream_id  # used to route live events via event_bus; None = DB-only, no live push
         self.loop = loop            # the asyncio loop that started this worker, for thread-safe publishing
-        # Gates whether a confirmed MATCH writes a real attendance record
-        # (app/routers/attendance.py record_detection_core). Defaults to
-        # False -- the SAFE default -- because this same StreamWorker
-        # class, via streams.py's start_worker(), is also what Video
-        # Analysis uses to process an uploaded demo file (see that
-        # router's own docstring: "the literal shared code path that
-        # makes 'same as RTSP' true"). Without this flag, analyzing a
+        # Gates which attendance tables a confirmed MATCH writes to
+        # (app/routers/attendance.py record_detection_core vs.
+        # record_simulated_detection_core). Defaults to False -- the SAFE
+        # default -- because this same StreamWorker class, via
+        # streams.py's start_worker(), is also what Video Analysis uses
+        # to process an uploaded demo file (see that router's own
+        # docstring: "the literal shared code path that makes 'same as
+        # RTSP' true"). Without this flag defaulting safely, analyzing a
         # demo video would write real EmployeeAttendance/AttendanceSegment
         # rows -- fabricated sign-in times, fabricated desk time -- into
         # the exact same tables real attendance reporting reads from.
-        # Only a genuinely live camera stream should ever set this True;
-        # both real call sites (streams.py, videos.py) now do so
-        # explicitly, not by relying on this default.
+        # When False, attendance is instead written to the fully separate
+        # SimulatedAttendance/SimulatedAttendanceSegment tables (item 8),
+        # never the real ones. Only a genuinely live camera stream should
+        # ever set this True; both real call sites (streams.py, videos.py)
+        # now do so explicitly, not by relying on this default.
         self.is_live = is_live
 
         self._stop_event = threading.Event()
@@ -394,12 +397,12 @@ class StreamWorker(threading.Thread):
         in this session, not a stranger who merely walked through frame.
 
         Heartbeat-gated per track_id (same HEARTBEAT_SECONDS baseline as
-        desk identification) so this doesn't write on every frame, and
-        gated on self.is_live for the same reason every other attendance
-        write in this file is -- see is_live's docstring.
+        desk identification). Writes to the real attendance tables when
+        self.is_live, or the simulated ones (item 8) otherwise -- unlike
+        the MATCH path below, this never skips entirely: a Video Analysis
+        run should show room presence in its own simulated view too, not
+        silently drop it.
         """
-        if not self.is_live:
-            return
         for person in people:
             if person.track_id is None or person.track_id in occupied_track_ids:
                 continue
@@ -413,13 +416,14 @@ class StreamWorker(threading.Thread):
             self._last_room_record_time[person.track_id] = now
 
             detected_employee_id = identity[1]
+            record_fn = attendance.record_detection_core if self.is_live else attendance.record_simulated_detection_core
             try:
-                attendance.record_detection_core(
+                record_fn(
                     db, self.org_id, detected_employee_id, cam_id=self.cam_id,
                     location=ROOM_LOCATION, timestamp=datetime.utcnow(),
                 )
             except Exception as e:
-                print(f"[stream_worker] room-presence record_detection_core failed for {detected_employee_id}: {e}")
+                print(f"[stream_worker] room-presence recording failed for {detected_employee_id}: {e}")
 
     def _process_frame(self, db, frame, rois: dict[str, dict], pose_model):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -483,15 +487,17 @@ class StreamWorker(threading.Thread):
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)
                     self._last_employee_name[name] = employee_name
 
-                    # Real attendance recording -- only for a genuinely
-                    # live stream (see self.is_live's docstring in
-                    # __init__), and only on an actual confirmed MATCH,
-                    # never on MISMATCH or UNKNOWN: attendance is about
-                    # tracking a real employee's real presence, not
-                    # logging every inconclusive glance at a desk.
-                    if self.is_live and event_type == "MATCH" and detected:
+                    # Attendance recording -- real tables for a genuinely
+                    # live stream, simulated tables (item 8) otherwise --
+                    # and only on an actual confirmed MATCH, never on
+                    # MISMATCH or UNKNOWN: attendance is about tracking a
+                    # real (or, for a demo run, a real-looking simulated)
+                    # employee presence, not logging every inconclusive
+                    # glance at a desk.
+                    if event_type == "MATCH" and detected:
+                        record_fn = attendance.record_detection_core if self.is_live else attendance.record_simulated_detection_core
                         try:
-                            attendance.record_detection_core(
+                            record_fn(
                                 db, self.org_id, detected, cam_id=self.cam_id,
                                 location=name, timestamp=datetime.utcnow(),
                             )
@@ -500,7 +506,7 @@ class StreamWorker(threading.Thread):
                             # the detection loop itself -- a DB hiccup
                             # here shouldn't stop occupancy/identification
                             # from continuing to work and being logged.
-                            print(f"[stream_worker] record_detection_core failed for {detected} at {name}: {e}")
+                            print(f"[stream_worker] attendance recording failed for {detected} at {name}: {e}")
                 # else: still occupied, within the current interval -- no
                 # identification call this frame, matching the documented
                 # "tens of calls per day, not per frame" design goal.
