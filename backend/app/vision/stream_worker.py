@@ -60,6 +60,13 @@ HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 60))
 # retry actually resolves an UNKNOWN vs. just repeating it.
 LOW_CONFIDENCE_RETRY_SECONDS = int(os.environ.get("IDENTIFY_LOW_CONFIDENCE_RETRY_SECONDS", 5))
 
+# Sentinel location value for AttendanceSegment rows representing "in the
+# room, but not at any specific workstation" (you confirmed "in the room"
+# means anywhere in this camera's frame). Distinguishes this from a real
+# workstation name -- a real desk's configured name is never this literal
+# string, so no genuine desk could ever collide with it.
+ROOM_LOCATION = "ROOM"
+
 # Live frame preview is throttled independently of both the poll interval
 # AND the identify heartbeat above: pushing a full base64 JPEG on every
 # single processed frame would flood the WebSocket, especially for video
@@ -120,6 +127,7 @@ class StreamWorker(threading.Thread):
         self._last_activity: dict[int, str] = {}          # track_id -> Activity.value, so activity is only published on a genuine change
         self._last_identity_by_track: dict[int, tuple] = {}  # track_id -> (event_type, detected_employee_id, employee_name, similarity), so a person's own box label follows them, not their workstation's rectangle
         self._last_employee_name: dict[str, str | None] = {}  # workstation_name -> employee_name from the most recent MATCH/MISMATCH, paired with _last_result
+        self._last_room_record_time: dict[int, float] = {}  # track_id -> monotonic time, heartbeat for "in room, not at desk" attendance segments
 
     def stop(self):
         self._stop_event.set()
@@ -365,6 +373,54 @@ class StreamWorker(threading.Thread):
             return LOW_CONFIDENCE_RETRY_SECONDS
         return HEARTBEAT_SECONDS
 
+    def _record_room_presence_for_roaming_people(self, db, people: list, occupied_track_ids: set, now: float):
+        """Item 7: room-vs-desk time split. A tracked person who is NOT
+        currently occupying any workstation ROI is, per your own
+        confirmation, still "in the room" (this camera's whole frame IS
+        the room). If that person has a KNOWN identity -- from a previous
+        confirmed MATCH at some desk, cached in _last_identity_by_track --
+        this records their room presence too, using the same
+        record_detection_core() attendance path but with location=
+        ROOM_LOCATION instead of a workstation name.
+
+        Deliberately does NOT run a fresh face-recognition call for
+        roaming people: that would mean identifying every person visible
+        anywhere in frame, every heartbeat, which is a much larger and
+        more expensive surface than the whole rest of this system's
+        "identify rarely, at a desk, event-driven" design. Using the
+        cached last-known identity for an already-tracked person is a
+        reasonable, honestly-scoped middle ground: it can only ever
+        report someone who was ALREADY confirmed at a desk at some point
+        in this session, not a stranger who merely walked through frame.
+
+        Heartbeat-gated per track_id (same HEARTBEAT_SECONDS baseline as
+        desk identification) so this doesn't write on every frame, and
+        gated on self.is_live for the same reason every other attendance
+        write in this file is -- see is_live's docstring.
+        """
+        if not self.is_live:
+            return
+        for person in people:
+            if person.track_id is None or person.track_id in occupied_track_ids:
+                continue
+            identity = self._last_identity_by_track.get(person.track_id)
+            if not identity or identity[0] != "MATCH" or not identity[1]:
+                continue  # never identified, or last known result wasn't a confident match
+
+            last_recorded = self._last_room_record_time.get(person.track_id, -1e9)
+            if (now - last_recorded) < HEARTBEAT_SECONDS:
+                continue
+            self._last_room_record_time[person.track_id] = now
+
+            detected_employee_id = identity[1]
+            try:
+                attendance.record_detection_core(
+                    db, self.org_id, detected_employee_id, cam_id=self.cam_id,
+                    location=ROOM_LOCATION, timestamp=datetime.utcnow(),
+                )
+            except Exception as e:
+                print(f"[stream_worker] room-presence record_detection_core failed for {detected_employee_id}: {e}")
+
     def _process_frame(self, db, frame, rois: dict[str, dict], pose_model):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             cv2.imwrite(tmp.name, frame)
@@ -373,6 +429,7 @@ class StreamWorker(threading.Thread):
         try:
             people = yolo_detector.detect_and_track_people(pose_model, tmp_path)
             now = time.monotonic()
+            occupied_track_ids = set()  # track_ids currently occupying SOME workstation this frame -- excluded from the room-presence pass below (item 7), since they're already covered as desk time, not room time
 
             for name, roi in rois.items():
                 # best_overlapping_person applies the same overlap gate as
@@ -384,6 +441,8 @@ class StreamWorker(threading.Thread):
                 # one occupied desk in frame.
                 occupying_person = face_crop.best_overlapping_person(people, roi)
                 occupied = occupying_person is not None
+                if occupied and occupying_person.track_id is not None:
+                    occupied_track_ids.add(occupying_person.track_id)
                 new_status = "ACTIVE" if occupied else "VACANT"
                 previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
                 self._last_occupancy[name] = new_status
@@ -462,6 +521,12 @@ class StreamWorker(threading.Thread):
                     event_type, detected, similarity = self._last_result.get(name, ("VACANT", None, None))
                     self._last_identity_by_track[occupying_person.track_id] = (
                         event_type, detected, self._last_employee_name.get(name), similarity)
+
+            # Item 7 (room-vs-desk time split): anyone tracked but NOT
+            # occupying a workstation this frame is still "in the room"
+            # (per your confirmation: this camera's whole frame IS the
+            # room) -- record that too, for anyone with a known identity.
+            self._record_room_presence_for_roaming_people(db, people, occupied_track_ids, now)
 
             # Activity classification: decoupled from occupancy/identity
             # (see _classify_and_publish_activity's docstring) -- runs
