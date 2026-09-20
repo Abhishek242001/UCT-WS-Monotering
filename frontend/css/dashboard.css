@@ -47,3 +47,19 @@ main{ max-width:1100px; margin:28px auto; padding:0 20px; }
 .status-tile.MISMATCH{ border-left-color:var(--amber); background:#FFFAF2; }
 .status-tile.UNKNOWN{ border-left-color:var(--slate); }
 .status-tile.VACANT{ border-left-color:var(--border); }
+
+/* Daily timeline (item 10) -- reuses --indigo/--amber (already the
+   app's own primary/accent colors) rather than introducing new ones;
+   gaps between blocks are just the bar's own background, representing
+   "away/not tracked" without needing a rendered block of their own. */
+.timeline-bar{
+  position:relative; height:34px; background:var(--bg); border:1px solid var(--border);
+  border-radius:6px; margin:10px 0 8px; overflow:hidden;
+}
+.timeline-block{ position:absolute; top:0; height:100%; min-width:2px; }
+.timeline-desk{ background:var(--indigo); }
+.timeline-room{ background:var(--amber); }
+.timeline-legend{ display:flex; gap:16px; font-size:12px; color:var(--slate); margin-bottom:10px; }
+.legend-item{ display:flex; align-items:center; gap:6px; }
+.legend-swatch{ display:inline-block; width:12px; height:12px; border-radius:3px; }
+.legend-swatch.timeline-gap{ background:var(--bg); border:1px solid var(--border); }

@@ -309,6 +309,44 @@
   <!-- ATTENDANCE -->
   <section id="tab-attendance" style="display:none">
     <div class="card">
+      <h2>Who's here now</h2>
+      <p class="hint">Everyone currently PRESENT or ON_BREAK on this org's real (live) cameras — always real attendance, never a Video Analysis demo run.</p>
+      <div id="liveNowMsg"></div>
+      <div id="liveNowGrid" class="status-grid"></div>
+      <button class="secondary" onclick="loadLiveNow()">Refresh</button>
+    </div>
+
+    <div class="card">
+      <h2>Employee stats</h2>
+      <div class="row">
+        <div><label>Employee ID</label><input id="statsEmpId" placeholder="EMP-1001"></div>
+        <div><label>From date</label><input id="statsFrom" type="date"></div>
+        <div><label>To date</label><input id="statsTo" type="date"></div>
+      </div>
+      <button class="primary" onclick="loadEmployeeStats()">Search</button>
+      <div id="statsMsg"></div>
+      <div id="statsSummary"></div>
+      <table>
+        <thead><tr><th>Date</th><th>Sign-in</th><th>Sign-out</th><th>Status</th><th>Hours present</th><th>Classification</th></tr></thead>
+        <tbody id="statsReportTable"></tbody>
+      </table>
+      <p class="hint">Click a row to load that date's timeline below.</p>
+    </div>
+
+    <div class="card">
+      <h2>Daily timeline</h2>
+      <p class="hint">Desk time vs. time in the room but not at a desk vs. away/untracked, for one date. Empty space in the bar means no segment was recorded for that stretch of time.</p>
+      <div class="row" style="max-width:200px">
+        <div><label>Date</label><input id="timelineDate" type="date"></div>
+      </div>
+      <button class="secondary" onclick="loadDailyTimeline()">Load timeline</button>
+      <div id="timelineMsg"></div>
+      <div id="timelineBar" class="timeline-bar"></div>
+      <div id="timelineLegend" class="timeline-legend"></div>
+      <div id="utilizationStat"></div>
+    </div>
+
+    <div class="card">
       <h2>Record a presence detection (demo)</h2>
       <p class="hint">In production this is called automatically by the stream-processing worker whenever an employee is identity-confirmed on any camera. Exposed here so sign-in/out can be tried without a live pipeline.</p>
       <div class="row">
@@ -320,7 +358,7 @@
     </div>
 
     <div class="card">
-      <h2>Today's status</h2>
+      <h2>Today's status (single employee)</h2>
       <div class="row">
         <div><label>Employee ID</label><input id="attCheckEmpId" placeholder="EMP-1001"></div>
       </div>

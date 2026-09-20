@@ -241,6 +241,34 @@ def attendance_segments(org_id: int, employee_id: str, date: str, db: Session = 
     ]}
 
 
+@router.get("/attendance/live_now")
+def attendance_live_now(org_id: int, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """Item 10: "who's here right now" -- every existing attendance
+    endpoint requires knowing an employee_id up front; there was no way
+    to see the org's whole current presence at a glance. Returns every
+    employee whose TODAY record is still PRESENT or ON_BREAK (i.e.
+    genuinely here now, not SIGNED_OUT and not simply never seen today).
+    Always reads REAL attendance -- "who's here" is inherently a live-
+    monitoring question, not something a Video Analysis demo run answers."""
+    verify_org_access(admin, org_id)
+    today = datetime.utcnow().date().isoformat()
+    rows = (
+        db.query(EmployeeAttendance, Employee)
+        .join(Employee, Employee.employee_id == EmployeeAttendance.employee_id)
+        .filter(
+            EmployeeAttendance.org_id == org_id,
+            EmployeeAttendance.date == today,
+            EmployeeAttendance.status.in_(["PRESENT", "ON_BREAK"]),
+        )
+        .all()
+    )
+    return {"org_id": org_id, "date": today, "employees": [
+        {"employee_id": rec.employee_id, "name": emp.name, "status": rec.status,
+         "last_seen_at": rec.last_seen_at, "last_seen_workstation": rec.last_seen_workstation}
+        for rec, emp in rows
+    ]}
+
+
 @router.get("/attendance/simulated/today")
 def simulated_attendance_today(org_id: int, employee_id: str, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
     """Item 8: the Video Analysis counterpart to /attendance/today --
