@@ -18,15 +18,41 @@ Colors are BGR (OpenCV's native order, not RGB).
 """
 import cv2
 
-PERSON_COLOR = (60, 200, 60)     # BGR: green
+PERSON_COLOR = (60, 200, 60)     # BGR: green -- generic/not-yet-identified person box
+MATCH_COLOR = (0, 200, 0)        # BGR: green -- confirmed identity
+MISMATCH_COLOR = (0, 140, 255)   # BGR: orange -- wrong person at this desk
+UNKNOWN_COLOR = (160, 160, 160)  # BGR: gray -- identification attempted, inconclusive
 ROI_COLOR = (255, 130, 40)       # BGR: blue-orange
 ACTIVE_COLOR = (0, 200, 0)       # BGR: green
 VACANT_COLOR = (60, 60, 220)     # BGR: red
 
 
+def _person_label_and_color(p, last_identity_by_track: dict[int, tuple] | None) -> tuple[str, tuple]:
+    """Resolves what to draw on a single person's own box: their employee
+    ID and name once identified (following them via track_id as they
+    move, not tied to any workstation's rectangle), a plain UNKNOWN once
+    an identification attempt has actually been made and come back
+    inconclusive, or the original generic "person {confidence}" label
+    for a track that's never been identified at all -- these read as
+    different situations to an admin watching the feed and shouldn't
+    look the same."""
+    identity = (last_identity_by_track or {}).get(p.track_id) if p.track_id is not None else None
+    if identity is None:
+        return f"person {p.confidence:.2f}", PERSON_COLOR
+
+    event_type, detected_employee_id, employee_name, _similarity = identity
+    if event_type == "MATCH" and detected_employee_id:
+        label = f"{detected_employee_id} - {employee_name}" if employee_name else detected_employee_id
+        return label, MATCH_COLOR
+    if event_type == "MISMATCH" and detected_employee_id:
+        label = f"{detected_employee_id} - {employee_name}" if employee_name else detected_employee_id
+        return f"{label} (MISMATCH)", MISMATCH_COLOR
+    return "UNKNOWN", UNKNOWN_COLOR
+
+
 def draw_annotations(frame, w: int, h: int, rois: dict[str, dict],
                       last_status: dict[str, str], last_result: dict[str, tuple],
-                      last_people: list) -> None:
+                      last_people: list, last_identity_by_track: dict[int, tuple] | None = None) -> None:
     """Mutates `frame` in place. `w`/`h` are the frame's pixel dimensions
     (passed explicitly rather than re-read from `frame.shape`, since both
     callers already have them on hand from the capture source).
@@ -36,8 +62,17 @@ def draw_annotations(frame, w: int, h: int, rois: dict[str, dict],
       recently computed occupancy state.
     - `last_result`: workstation_name -> (event_type, detected_employee_id,
       similarity) from the most recent identify() call, or a
-      ("VACANT", None, None) default.
+      ("VACANT", None, None) default. Still drawn as the per-workstation
+      status banner below, independent of the per-person label change.
     - `last_people`: the most recent yolo_detector.PersonDetection list.
+    - `last_identity_by_track`: track_id -> (event_type,
+      detected_employee_id, employee_name, similarity), the most recent
+      identify() result for THAT specific tracked person -- this is what
+      lets a person's own box show their name and follow them as they
+      move, including away from any workstation ROI, rather than the
+      identity being anchored to a fixed desk rectangle. Optional
+      (defaults to None/no track-based labels) for backward
+      compatibility with any caller that hasn't adopted tracking.
 
     Callers are expected to keep drawing with the latest CACHED values on
     every frame even when detection/identification only ran on some of
@@ -48,9 +83,10 @@ def draw_annotations(frame, w: int, h: int, rois: dict[str, dict],
     for p in last_people:
         x1, y1 = int(p.x1 * w), int(p.y1 * h)
         x2, y2 = int(p.x2 * w), int(p.y2 * h)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), PERSON_COLOR, 2)
-        cv2.putText(frame, f"person {p.confidence:.2f}", (x1, max(12, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, PERSON_COLOR, 1, cv2.LINE_AA)
+        label, color = _person_label_and_color(p, last_identity_by_track)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(frame, label, (x1, max(12, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
     banner_y = 24
     for name, roi in rois.items():

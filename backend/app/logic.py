@@ -286,3 +286,62 @@ def classify_activity(keypoint_confidence: dict, torso_angle_deg: float, is_movi
     # simple here since this function is a rule-based baseline, not the
     # final production classifier).
     return Activity.SITTING if keypoint_confidence.get("seated_hint", 0.0) >= 0.5 else Activity.STANDING
+
+
+# ---------------------------------------------------------------------------
+# Adapting a real detector's keypoints (yolo_detector.PersonDetection,
+# COCO's left/right-named pairs) into the joint-level inputs
+# classify_activity() above expects. Kept here, not in yolo_detector.py,
+# so this module stays free of any dependency on the vision layer -- it
+# takes a plain dict, same as classify_activity() itself.
+# ---------------------------------------------------------------------------
+
+def combine_side_pair(keypoints: dict, left_name: str, right_name: str) -> tuple[float, float, float]:
+    """Returns (x, y, confidence) for a joint reported as a COCO
+    left/right pair -- same (x, y, confidence) order PersonDetection.keypoints
+    itself uses -- picking whichever side has higher confidence: either
+    side being visible is enough evidence the joint exists (a desk, an
+    off-angle pose, or the camera's own viewpoint commonly occludes one
+    side but not the other), and using ONE side's actual position avoids
+    averaging a confident position together with a low-confidence,
+    potentially meaningless one. Missing keys default to (0.0, 0.0, 0.0)."""
+    left = keypoints.get(left_name, (0.0, 0.0, 0.0))
+    right = keypoints.get(right_name, (0.0, 0.0, 0.0))
+    return left if left[2] >= right[2] else right
+
+
+def activity_inputs_from_coco_keypoints(keypoints: dict) -> tuple[dict, float]:
+    """Converts the 17 COCO-named keypoints yolo_detector.PersonDetection
+    carries into the (keypoint_confidence, torso_angle_deg) inputs
+    classify_activity() expects, which are joint-level (one shoulder, one
+    hip, ...), not side-level.
+
+    torso_angle_deg is measured from the shoulder-midpoint to
+    hip-midpoint vector, 0 == perfectly vertical (matching
+    classify_activity()'s documented convention), using image
+    coordinates where y increases downward.
+
+    Known, deliberately unaddressed limitation: this does NOT compute a
+    'seated_hint' -- no validated geometric heuristic for it exists yet
+    (a hip/knee-angle-based guess would be unvalidated against real
+    footage, and per point 93 knee/ankle keypoints are usually
+    desk-occluded for a seated employee anyway, giving little to
+    validate it against). Until one is added and validated,
+    classify_activity() will resolve an upright, stationary person to
+    STANDING rather than SITTING even when actually seated -- this is a
+    known gap, not a silently-accepted wrong answer.
+    """
+    shoulder_x, shoulder_y, shoulder_c = combine_side_pair(keypoints, "left_shoulder", "right_shoulder")
+    hip_x, hip_y, hip_c = combine_side_pair(keypoints, "left_hip", "right_hip")
+    _, _, knee_c = combine_side_pair(keypoints, "left_knee", "right_knee")
+    _, _, ankle_c = combine_side_pair(keypoints, "left_ankle", "right_ankle")
+
+    keypoint_confidence = {"shoulder": shoulder_c, "hip": hip_c, "knee": knee_c, "ankle": ankle_c}
+
+    if shoulder_c <= 0.0 or hip_c <= 0.0:
+        return keypoint_confidence, 0.0  # no usable torso vector -- classify_activity() will UNKNOWN on confidence regardless
+
+    dx = hip_x - shoulder_x
+    dy = hip_y - shoulder_y
+    torso_angle_deg = math.degrees(math.atan2(dx, dy)) if (dx or dy) else 0.0
+    return keypoint_confidence, torso_angle_deg

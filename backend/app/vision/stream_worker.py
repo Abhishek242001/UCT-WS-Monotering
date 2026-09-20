@@ -32,6 +32,7 @@ against the synthetic test video's frames, not against real RTSP network
 jitter/bandwidth.
 """
 import base64
+import math
 import os
 import tempfile
 import threading
@@ -56,6 +57,17 @@ LIVE_FRAME_PUBLISH_FPS = float(os.environ.get("LIVE_FRAME_PUBLISH_FPS", 4))
 LIVE_FRAME_MIN_INTERVAL_SECONDS = 1.0 / LIVE_FRAME_PUBLISH_FPS if LIVE_FRAME_PUBLISH_FPS > 0 else 0
 LIVE_FRAME_JPEG_QUALITY = int(os.environ.get("LIVE_FRAME_JPEG_QUALITY", 70))
 
+# Activity classification (app/logic.py classify_activity(), decoupled
+# from occupancy/identification per docs/100-key-points.md points 91-92):
+# is_moving is derived from how far a tracked person's hip position (or,
+# when the hip isn't confidently located, their bounding-box center)
+# shifts per second. This threshold is a documented placeholder, not a
+# calibrated constant -- it has not been validated against real footage
+# at a known camera distance/resolution, and should be tuned once real
+# footage is available, the same way sim_threshold/snr_threshold in
+# logic.py are already flagged as needing real calibration data.
+ACTIVITY_MOVING_THRESHOLD_PER_SEC = float(os.environ.get("ACTIVITY_MOVING_THRESHOLD_PER_SEC", 0.05))
+
 
 class StreamWorker(threading.Thread):
     def __init__(self, source: str, org_id: int, cam_id: int,
@@ -77,6 +89,10 @@ class StreamWorker(threading.Thread):
         self._last_identify_time: dict[str, float] = {}  # workstation_name -> monotonic time
         self._last_result: dict[str, tuple] = {}          # workstation_name -> (event_type, detected_employee_id, similarity), for live-frame labels between identify() calls
         self._last_frame_publish_time: float = -1e9
+        self._last_position: dict[int, tuple[float, float, float]] = {}  # track_id -> (x_norm, y_norm, monotonic_time), for is_moving
+        self._last_activity: dict[int, str] = {}          # track_id -> Activity.value, so activity is only published on a genuine change
+        self._last_identity_by_track: dict[int, tuple] = {}  # track_id -> (event_type, detected_employee_id, employee_name, similarity), so a person's own box label follows them, not their workstation's rectangle
+        self._last_employee_name: dict[str, str | None] = {}  # workstation_name -> employee_name from the most recent MATCH/MISMATCH, paired with _last_result
 
     def stop(self):
         self._stop_event.set()
@@ -185,7 +201,7 @@ class StreamWorker(threading.Thread):
 
         annotated = frame.copy()
         frame_annotate.draw_annotations(
-            annotated, w, h, rois, self._last_occupancy, self._last_result, people
+            annotated, w, h, rois, self._last_occupancy, self._last_result, people, self._last_identity_by_track
         )
         ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, LIVE_FRAME_JPEG_QUALITY])
         if not ok:
@@ -227,7 +243,7 @@ class StreamWorker(threading.Thread):
         try:
             live_embedding, _width_px = face_embedder.extract_embedding(crop_path)
         except ValueError:
-            return "UNKNOWN", None, None, None  # occupied per YOLO, but no face found in the cropped region
+            return "UNKNOWN", None, None, None, None  # occupied per YOLO, but no face found in the cropped region
         finally:
             os.unlink(crop_path)
 
@@ -237,9 +253,10 @@ class StreamWorker(threading.Thread):
         best = logic.match_single_pass(live_embedding, grouped)
 
         if best is None:
-            return "UNKNOWN", None, None, None
+            return "UNKNOWN", None, None, None, None
 
         detected_employee_id, _view, similarity = best
+        employee_name = next((row.employee.name for row in gallery_rows if row.employee_id == detected_employee_id), None)
         snr = similarity * 10  # placeholder scale pending a fitted per-employee decay curve
         status = logic.decide_match_status(
             occupancy_present=True, best_similarity=similarity, best_snr=snr,
@@ -247,7 +264,64 @@ class StreamWorker(threading.Thread):
         )
         if status == logic.MatchStatus.UNKNOWN:
             detected_employee_id = None
-        return status.value, detected_employee_id, similarity, snr
+        return status.value, detected_employee_id, similarity, snr, employee_name
+
+    def _update_position_and_check_moving(self, person, now: float) -> bool:
+        """Tracks this person's approximate body position across frames
+        (keyed by their persistent track_id) to derive is_moving for
+        classify_activity(). Prefers the hip position (more representative
+        of body movement than a bounding-box center, which shifts with
+        pose/arm position even when someone is stationary) when it's
+        confidently located; falls back to the box center otherwise. A
+        person's first-seen frame always returns False -- movement can
+        only be judged from a second sample, not a first."""
+        hip_c, hip_x, hip_y = (0.0, 0.0, 0.0)
+        if person.keypoints:
+            hip_x, hip_y, hip_c = logic.combine_side_pair(person.keypoints, "left_hip", "right_hip")
+        if hip_c >= logic.MIN_KEYPOINT_CONFIDENCE:
+            cx, cy = hip_x, hip_y
+        else:
+            cx, cy = (person.x1 + person.x2) / 2, (person.y1 + person.y2) / 2
+
+        prior = self._last_position.get(person.track_id)
+        self._last_position[person.track_id] = (cx, cy, now)
+        if prior is None:
+            return False
+        px, py, pt = prior
+        dt = now - pt
+        if dt <= 0:
+            return False
+        distance = math.hypot(cx - px, cy - py)
+        return (distance / dt) > ACTIVITY_MOVING_THRESHOLD_PER_SEC
+
+    def _classify_and_publish_activity(self, people: list, now: float):
+        """Runs the already-tested classify_activity() (app/logic.py)
+        against every tracked person in the frame -- not just workstation
+        occupants -- since per 100-key-points.md points 91-92 this is
+        deliberately decoupled from occupancy detection and identity
+        recognition. Its real value is characterizing people who are NOT
+        at any desk (standing, walking, in a group discussion) just as
+        much as those who are, so it is not scoped to per-ROI occupants
+        the way _identify() is.
+
+        Published only on a genuine per-track change (mirrors the
+        occupancy debounce pattern in _process_frame) -- not every frame,
+        to avoid flooding the live feed the same way undebounced VACANT
+        events once did.
+        """
+        for person in people:
+            if person.track_id is None or not person.keypoints:
+                continue
+            is_moving = self._update_position_and_check_moving(person, now)
+            keypoint_confidence, torso_angle_deg = logic.activity_inputs_from_coco_keypoints(person.keypoints)
+            activity = logic.classify_activity(keypoint_confidence, torso_angle_deg, is_moving)
+
+            if self._last_activity.get(person.track_id) != activity.value:
+                self._last_activity[person.track_id] = activity.value
+                self._publish({
+                    "type": "activity", "track_id": person.track_id,
+                    "activity": activity.value, "frame_number": self.frames_processed,
+                })
 
     def _process_frame(self, db, frame, rois: dict[str, dict], pose_model):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -295,11 +369,35 @@ class StreamWorker(threading.Thread):
                 # thereafter -- never on every frame.
                 if status_changed or heartbeat_due:
                     self._last_identify_time[name] = now
-                    event_type, detected, similarity, snr = self._identify(db, frame, occupying_person, assigned)
+                    event_type, detected, similarity, snr, employee_name = self._identify(db, frame, occupying_person, assigned)
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)
+                    self._last_employee_name[name] = employee_name
                 # else: still occupied, within the heartbeat window -- no
                 # identification call this frame, matching the documented
                 # "tens of calls per day, not per frame" design goal.
+
+                # Re-associate this workstation's latest known identity
+                # result with whichever track_id currently occupies it --
+                # runs on EVERY occupied frame, not only when _identify()
+                # itself just ran above. This matters because a brand-new
+                # track's ID is often still unconfirmed (None) on the
+                # exact frame _identify() fires: verified directly that
+                # Ultralytics' ByteTrack only confirms an ID from a
+                # track's SECOND seen frame onward, not its first. Without
+                # this being separate from the identify() branch above,
+                # the very first identification for a newly-arrived
+                # person would silently never reach the display -- lost
+                # to a one-frame timing gap, not a logic error as such.
+                if occupying_person.track_id is not None:
+                    event_type, detected, similarity = self._last_result.get(name, ("VACANT", None, None))
+                    self._last_identity_by_track[occupying_person.track_id] = (
+                        event_type, detected, self._last_employee_name.get(name), similarity)
+
+            # Activity classification: decoupled from occupancy/identity
+            # (see _classify_and_publish_activity's docstring) -- runs
+            # against every tracked person in frame, not just workstation
+            # occupants.
+            self._classify_and_publish_activity(people, now)
 
             # Live preview push: once per processed frame (covering every
             # workstation's current box/status together in one image),
