@@ -272,6 +272,27 @@ class SimulatedAttendanceSegment(Base):
     duration_seconds = Column(Float)
 
 
+class VideoAnalysisRun(Base):
+    """Item 11: a real, persisted record of each Video Analysis run --
+    previously there was none at all. An uploaded video's own metadata
+    (routers/videos.py's _videos dict + JSON sidecars) only tracks the
+    FILE; nothing recorded that it had ever been analyzed, when, with
+    what org/cam, or how it went. Keyed by stream_id (the same id the
+    live WebSocket uses) so app/vision/stream_worker.py can find and
+    close out its own row on completion without needing a separate
+    run-id threaded through its constructor."""
+    __tablename__ = "video_analysis_runs"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    org_id = Column(Integer, nullable=False)
+    cam_id = Column(Integer, nullable=False)
+    video_id = Column(String, nullable=False)
+    workstation_name = Column(String)
+    stream_id = Column(String, nullable=False, unique=True)
+    started_at = Column(String, nullable=False)
+    completed_at = Column(String)       # null while the run is still in progress
+    frames_processed = Column(Integer)  # null until completed_at is set
+
+
 class Shift(Base):
     __tablename__ = "shifts"
     shift_id = Column(String, primary_key=True)

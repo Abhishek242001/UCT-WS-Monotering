@@ -166,6 +166,7 @@ async function runAiAnalysis() {
   document.getElementById('analysisStatusMsg').innerHTML =
     `Analyzing on <b>${escapeHtml(body.workstation_name)}</b> (org=${body.org_id}, cam=${body.cam_id})` +
     (usedDefaults.length ? ` — defaults used for: ${usedDefaults.join(', ')}` : ' — using your specified parameters');
+  loadAnalysisHistory();  // the new run shows up immediately, status "running"
 
   // Same real-time push mechanism a live RTSP camera stream uses —
   // this is not a simulation, it's the identical WebSocket endpoint.
@@ -201,6 +202,7 @@ async function runAiAnalysis() {
       document.getElementById('analysisProgressBar').style.width = '100%';
       document.getElementById('analysisProgressLabel').textContent = '100%';
       loadIdentityStatus();
+      loadAnalysisHistory();  // flips this run's status to "completed" with a real frame count
       ws.close();
     } else if (msg.type === 'error') {
       document.getElementById('analysisStatusMsg').innerHTML += ` — <span style="color:#C0392B">${escapeHtml(msg.message)}</span>`;
@@ -295,4 +297,22 @@ async function downloadAnnotated() {
     URL.revokeObjectURL(url);
     el.textContent += ' Done.';
   } catch (e) { el.textContent = 'Rendered, but download failed: ' + e.message; }
+}
+
+async function loadAnalysisHistory() {
+  try {
+    const body = await api(`/videos/analysis_runs?org_id=${getOrgId()}`);
+    const rows = body.runs.map(r => {
+      const started = escapeHtml(r.started_at || '').replace('T', ' ').substring(0, 19);
+      const frames = r.frames_processed != null ? r.frames_processed : '—';
+      return `<tr>
+        <td>${escapeHtml(r.filename)}</td>
+        <td>${escapeHtml(body.org_id)} / ${escapeHtml(r.cam_id)}</td>
+        <td>${started}</td>
+        <td><span class="badge ${r.status === 'completed' ? 'MATCH' : 'UNKNOWN'}">${escapeHtml(r.status)}</span></td>
+        <td>${frames}</td>
+      </tr>`;
+    }).join('');
+    document.getElementById('historyTable').innerHTML = rows || '<tr><td colspan="5">No analysis runs yet for this org.</td></tr>';
+  } catch (e) { showMsg('historyMsg', e.message, false); }
 }

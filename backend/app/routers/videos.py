@@ -19,13 +19,14 @@ import hashlib
 import json
 import os
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Workstation, AdminSession
+from app.models import Workstation, VideoAnalysisRun, AdminSession
 from app.routers.admin_auth import require_admin, verify_org_access
 from app.routers import streams as streams_router
 from app.vision import video_export
@@ -163,6 +164,34 @@ def list_videos(org_id: int, admin: AdminSession = Depends(require_admin)):
     ]}
 
 
+@router.get("/videos/analysis_runs")
+def list_analysis_runs(org_id: int, db: Session = Depends(get_db), admin: AdminSession = Depends(require_admin)):
+    """Item 11: the historical view -- previously there was no record at
+    all of past analysis runs, only the uploaded video FILES themselves
+    (list_videos above). Filename is looked up from the same in-memory
+    _videos registry list_videos already uses (a run's own video_id may
+    no longer resolve if the video was deleted from disk some other way
+    -- shown as "(deleted)" rather than failing the whole list for one
+    stale row)."""
+    verify_org_access(admin, org_id)
+    runs = (
+        db.query(VideoAnalysisRun)
+        .filter_by(org_id=org_id)
+        .order_by(VideoAnalysisRun.started_at.desc())
+        .all()
+    )
+    return {"org_id": org_id, "runs": [
+        {
+            "stream_id": r.stream_id, "video_id": r.video_id,
+            "filename": _videos.get(r.video_id, {}).get("filename", "(deleted)"),
+            "cam_id": r.cam_id, "workstation_name": r.workstation_name,
+            "started_at": r.started_at, "completed_at": r.completed_at,
+            "frames_processed": r.frames_processed,
+            "status": "completed" if r.completed_at else "running",
+        } for r in runs
+    ]}
+
+
 def _ensure_demo_workstation(db: Session, org_id: int, cam_id: int) -> str:
     """Auto-provisions a full-frame ROI if this org/cam has no workstation
     configured yet, so 'upload -> Run AI Analysis' produces a visible
@@ -216,6 +245,19 @@ async def analyze_video(
         )
     except ValueError as e:
         raise HTTPException(422, str(e))
+
+    # Item 11: a real, persisted record that this run happened at all --
+    # previously nothing tracked this beyond the ephemeral in-memory
+    # stream_id, lost the moment the server restarted or the WebSocket
+    # was closed. stream_worker.py closes this same row out (sets
+    # completed_at/frames_processed) when the run finishes, matched by
+    # stream_id -- see its own run() method.
+    db.add(VideoAnalysisRun(
+        org_id=resolved_org_id, cam_id=resolved_cam_id, video_id=video_id,
+        workstation_name=workstation_name, stream_id=stream_id,
+        started_at=datetime.utcnow().isoformat(),
+    ))
+    db.commit()
 
     return {
         "stream_id": stream_id, "video_id": video_id, "status": "started",

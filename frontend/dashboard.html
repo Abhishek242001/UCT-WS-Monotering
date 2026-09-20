@@ -29,7 +29,7 @@
   <button onclick="showTab('employees'); loadDeclaredDistances();">Employees</button>
   <button onclick="showTab('detect')">Try Detection</button>
   <button onclick="showTab('livestream')">Live Stream</button>
-  <button onclick="showTab('videoanalysis')">Video Analysis</button>
+  <button onclick="showTab('videoanalysis'); loadAnalysisHistory();">Video Analysis</button>
   <button onclick="showTab('attendance')">Attendance</button>
 </nav>
 
@@ -303,6 +303,17 @@
       </div>
       <p class="hint">Showing the most recent <span id="analysisEventCap">300</span> events — older ones are dropped from view (not from the database) to keep the browser responsive on long videos.</p>
       <div class="event-log" id="analysisEventLog"></div>
+    </div>
+
+    <div class="card">
+      <h2>Past analysis runs</h2>
+      <p class="hint">A real record of past runs — which video, when, on which org/camera. Results from a completed run live in the Attendance tab's simulated tables, kept fully separate from real attendance (see <code>/attendance/simulated/segments</code>) — use the org and date shown here to look one up for a specific employee.</p>
+      <div id="historyMsg"></div>
+      <table>
+        <thead><tr><th>Video</th><th>Org / Cam</th><th>Started</th><th>Status</th><th>Frames</th></tr></thead>
+        <tbody id="historyTable"></tbody>
+      </table>
+      <button class="secondary" onclick="loadAnalysisHistory()">Refresh</button>
     </div>
   </section>
 

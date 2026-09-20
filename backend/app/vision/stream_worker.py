@@ -42,7 +42,7 @@ from datetime import datetime
 import cv2
 
 from app import database as db_module
-from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEvent, EmployeeFaceGallery, Employee
+from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEvent, EmployeeFaceGallery, Employee, VideoAnalysisRun
 from app import logic
 from app.routers import attendance
 from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate, face_crop
@@ -193,6 +193,22 @@ class StreamWorker(threading.Thread):
                     time.sleep(self.poll_interval_seconds)
         finally:
             cap.release()
+            # Item 11: close out this run's VideoAnalysisRun row, if one
+            # exists -- only Video Analysis runs have one (created by
+            # routers/videos.py's /analyze endpoint, keyed by stream_id);
+            # a live camera stream's stream_id simply won't match any
+            # row, making this a harmless no-op for that case. Guarded:
+            # this bookkeeping must never prevent the "completed" event
+            # itself from being published, even if the DB write fails.
+            try:
+                if self.stream_id:
+                    run_row = db.query(VideoAnalysisRun).filter_by(stream_id=self.stream_id).first()
+                    if run_row:
+                        run_row.completed_at = datetime.utcnow().isoformat()
+                        run_row.frames_processed = self.frames_processed
+                        db.commit()
+            except Exception as e:
+                print(f"[stream_worker] failed to close out VideoAnalysisRun for stream_id={self.stream_id}: {e}")
             db.close()
             reason = "stopped" if self._stop_event.is_set() else "source_ended"
             self._publish({"type": "completed", "frames_processed": self.frames_processed, "reason": reason})
