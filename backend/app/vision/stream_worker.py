@@ -45,7 +45,18 @@ from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEv
 from app import logic
 from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate, face_crop
 
-HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 30))
+HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 60))
+
+# When the last identification result for a desk was UNKNOWN -- occupied,
+# but no confident match -- retry sooner than the normal heartbeat rather
+# than leaving that desk mislabeled for up to a full HEARTBEAT_SECONDS.
+# A face that briefly turned away, was poorly lit, or was too small in
+# that one frame is often resolvable on a quick second look; there's no
+# reason a transient miss should cost a full minute before it's
+# re-checked. This is a documented placeholder, not calibrated against
+# real footage -- tune once real deployment data shows how often a quick
+# retry actually resolves an UNKNOWN vs. just repeating it.
+LOW_CONFIDENCE_RETRY_SECONDS = int(os.environ.get("IDENTIFY_LOW_CONFIDENCE_RETRY_SECONDS", 5))
 
 # Live frame preview is throttled independently of both the poll interval
 # AND the identify heartbeat above: pushing a full base64 JPEG on every
@@ -323,6 +334,21 @@ class StreamWorker(threading.Thread):
                     "activity": activity.value, "frame_number": self.frames_processed,
                 })
 
+    def _identify_retry_interval_seconds(self, workstation_name: str) -> float:
+        """The baseline is HEARTBEAT_SECONDS per occupied desk -- but if
+        the last identification result for this desk was UNKNOWN, retry
+        after LOW_CONFIDENCE_RETRY_SECONDS instead (see that constant's
+        docstring for why). A fresh desk with no prior result yet uses
+        the normal baseline -- it doesn't matter in practice, since a
+        desk with no prior result is always mid-transition and gets
+        identified immediately via status_changed regardless of this
+        value, but returning something sane rather than a special case
+        keeps this function simple to reason about on its own."""
+        last_event_type = self._last_result.get(workstation_name, (None, None, None))[0]
+        if last_event_type == "UNKNOWN":
+            return LOW_CONFIDENCE_RETRY_SECONDS
+        return HEARTBEAT_SECONDS
+
     def _process_frame(self, db, frame, rois: dict[str, dict], pose_model):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             cv2.imwrite(tmp.name, frame)
@@ -365,14 +391,23 @@ class StreamWorker(threading.Thread):
                     continue
 
                 # Event-driven identification trigger (Section 3.2): fire
-                # on a VACANT -> ACTIVE transition, or on a slow heartbeat
-                # thereafter -- never on every frame.
-                if status_changed or heartbeat_due:
+                # on a VACANT -> ACTIVE transition, or on a heartbeat
+                # thereafter -- never on every frame. The heartbeat
+                # interval is dynamic: the normal baseline, or a faster
+                # retry if the last result here was UNKNOWN -- see
+                # _identify_retry_interval_seconds(). Deliberately a
+                # SEPARATE check from the VACANT path's heartbeat_due
+                # above: that one governs how often to re-publish/re-write
+                # a VACANT event (unrelated to identification confidence)
+                # and must stay on the fixed baseline, not the dynamic one.
+                identify_retry_due = (now - self._last_identify_time.get(name, -1e9)) \
+                    >= self._identify_retry_interval_seconds(name)
+                if status_changed or identify_retry_due:
                     self._last_identify_time[name] = now
                     event_type, detected, similarity, snr, employee_name = self._identify(db, frame, occupying_person, assigned)
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)
                     self._last_employee_name[name] = employee_name
-                # else: still occupied, within the heartbeat window -- no
+                # else: still occupied, within the current interval -- no
                 # identification call this frame, matching the documented
                 # "tens of calls per day, not per frame" design goal.
 
