@@ -127,3 +127,84 @@ def test_simulate_detection_matches_person_via_crop(client, admin_token, wide_fr
     assert body["event_type"] == "MATCH"
     assert body["detected_employee_id"] == "EMP-CROP-TEST"
     assert body["similarity"] > 0.8  # same person, should be a strong match, not a borderline one
+
+
+@pytest.fixture()
+def synthetic_video_with_small_face(wide_frame_with_small_face, tmp_path):
+    """Same real small-face-in-a-wide-frame scenario as
+    wide_frame_with_small_face, but as a short video instead of a single
+    image, so it can drive an actual StreamWorker -- the live/video-
+    analysis pipeline (stream_worker.py) -- rather than only the
+    single-image simulate_detection endpoint the two tests above already
+    cover. Blank frames first (VACANT), then the wide frame repeated
+    (ACTIVE), matching the shape of the synthetic_video fixture used by
+    test_stream_worker.py."""
+    import cv2
+    import numpy as np
+
+    wide = cv2.imread(wide_frame_with_small_face["wide_frame_path"])
+    h, w = wide.shape[:2]
+    blank = np.full((h, w, 3), 40, dtype="uint8")
+
+    path = str(tmp_path / "synthetic_small_face.mp4")
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 5, (w, h))
+    for _ in range(3):
+        writer.write(blank)
+    for _ in range(3):
+        writer.write(wide)
+    writer.release()
+    return {"video_path": path, "enroll_photo_path": wide_frame_with_small_face["enroll_photo_path"]}
+
+
+def test_stream_worker_matches_person_via_crop(client, admin_token, synthetic_video_with_small_face):
+    """The live-pipeline counterpart to test_simulate_detection_matches_
+    person_via_crop above: proves stream_worker.py's _identify() -- used
+    by both the Live Stream and Video Analysis tabs, NOT just the
+    single-image "try it" endpoint -- now also crops to the occupying
+    person before extracting a face embedding, instead of passing the
+    full frame.
+
+    Before this fix, stream_worker._identify() called
+    face_embedder.extract_embedding() on the full, uncropped frame. Given
+    this exact scenario (a real, enrolled person whose face is a small
+    fraction of a wide frame), that full-frame call raises ValueError
+    (proven directly by test_full_frame_face_detection_fails_on_small_face
+    above, against the same frame), which stream_worker.py's old code
+    caught and turned into a silent event_type="UNKNOWN" -- exactly the
+    "low recognition performance" / "not bounded with person bounding
+    box" symptom reported against the real live system. This test proves
+    that no longer happens: the same frame, run through the real
+    StreamWorker end to end, now produces a correct MATCH.
+    """
+    from app.vision.stream_worker import StreamWorker
+
+    h = {"Authorization": f"Bearer {admin_token}"}
+    with open(synthetic_video_with_small_face["enroll_photo_path"], "rb") as f:
+        resp = client.post("/employees/enroll", headers=h, data={
+            "org_id": 1, "employee_id": "EMP-STREAM-CROP", "name": "Stream Crop Regression Test",
+            "view": "front", "depth_m": 1.0,
+        }, files={"photo": ("front.jpg", f, "image/jpeg")})
+    assert resp.status_code == 201, resp.text
+
+    client.post("/workstations/save", headers=h, json={
+        "org_id": 1, "cam_id": 951, "workstations": [{"name": "StreamCropDesk", "x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0}],
+    })
+    client.post("/workstations/assign", headers=h, json={
+        "org_id": 1, "cam_id": 951, "workstation_name": "StreamCropDesk",
+        "employee_id": "EMP-STREAM-CROP", "effective_from": "2026-01-01",
+    })
+
+    worker = StreamWorker(source=synthetic_video_with_small_face["video_path"], org_id=1, cam_id=951, poll_interval_seconds=0)
+    worker.start()
+    worker.join(timeout=60)
+    assert worker.frames_processed == 6
+
+    status = client.get("/workstations/identity_status", params={"org_id": 1, "cam_id": 951}, headers=h)
+    ws = status.json()["workstations"][0]
+    # Without the crop fix in stream_worker.py, this would be
+    # match_status="UNKNOWN", detected_employee_id=None, similarity=None
+    # -- extract_embedding raising ValueError on the full frame.
+    assert ws["similarity"] is not None, "face detection failed in the live pipeline -- crop-before-detect regression"
+    assert ws["match_status"] == "MATCH"
+    assert ws["detected_employee_id"] == "EMP-STREAM-CROP"
+    assert ws["similarity"] > 0.8

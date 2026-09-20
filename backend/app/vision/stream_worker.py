@@ -42,7 +42,7 @@ import cv2
 from app import database as db_module
 from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEvent, EmployeeFaceGallery, Employee
 from app import logic
-from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate
+from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate, face_crop
 
 HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 30))
 
@@ -187,15 +187,40 @@ class StreamWorker(threading.Thread):
             "image": f"data:image/jpeg;base64,{encoded}",
         })
 
-    def _identify(self, db, frame_path: str, assigned_employee_id: str | None):
-        """Runs the real matching pipeline: extract an embedding from the
-        frame, single-pass match against the enrolled gallery (app/logic.py
-        -- the same functions verified by the design-acceptance-suite),
-        and gate the decision through decide_match_status."""
+    def _identify(self, db, frame, occupying_person, assigned_employee_id: str | None):
+        """Runs the real matching pipeline: extract an embedding from a
+        crop of the frame around the specific person occupying this ROI
+        (app/vision/face_crop.py -- the same crop-to-person-box fix
+        already wired into workstations.py's simulate_detection, applied
+        here to the live/video-analysis path for the first time), single-
+        pass match against the enrolled gallery (app/logic.py -- the same
+        functions verified by the design-acceptance-suite), and gate the
+        decision through decide_match_status.
+
+        Cropping to `occupying_person` rather than passing the full frame
+        fixes two real problems at once, not just one:
+          1. The one this fix was built for (100-key-points.md point 30):
+             a person who is a small part of a wide shot has a
+             proportionally tiny face after InsightFace's internal
+             det_size=(320,320) resize, which can fail detection entirely
+             even though the person is clearly, visibly present.
+          2. A second, previously-unnoticed correctness bug: with more
+             than one occupied workstation in the same camera frame, the
+             old code passed the SAME full frame to every workstation's
+             _identify() call, so InsightFace's arbitrary "first face
+             found" (faces[0]) had no way to know which detected face
+             belonged to THIS workstation's occupant. Cropping to the
+             specific person `best_overlapping_person` resolved for this
+             ROI (see _process_frame) makes each call see only the face
+             that can possibly be relevant to it.
+        """
+        crop_path = face_crop.crop_person_region(frame, occupying_person)
         try:
-            live_embedding, _width_px = face_embedder.extract_embedding(frame_path)
+            live_embedding, _width_px = face_embedder.extract_embedding(crop_path)
         except ValueError:
-            return "UNKNOWN", None, None, None  # occupied per YOLO, but no face found in the frame
+            return "UNKNOWN", None, None, None  # occupied per YOLO, but no face found in the cropped region
+        finally:
+            os.unlink(crop_path)
 
         gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == self.org_id).all()
         gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
@@ -225,7 +250,15 @@ class StreamWorker(threading.Thread):
             now = time.monotonic()
 
             for name, roi in rois.items():
-                occupied = any(yolo_detector.boxes_overlap(p, roi) for p in people)
+                # best_overlapping_person applies the same overlap gate as
+                # boxes_overlap (used everywhere else in this loop) but
+                # also resolves WHICH person occupies this specific ROI,
+                # which _identify needs to crop to the right face -- see
+                # its docstring for why that matters even in the
+                # single-workstation case, and doubly so with more than
+                # one occupied desk in frame.
+                occupying_person = face_crop.best_overlapping_person(people, roi)
+                occupied = occupying_person is not None
                 new_status = "ACTIVE" if occupied else "VACANT"
                 previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
                 self._last_occupancy[name] = new_status
@@ -253,7 +286,7 @@ class StreamWorker(threading.Thread):
                 # thereafter -- never on every frame.
                 if status_changed or heartbeat_due:
                     self._last_identify_time[name] = now
-                    event_type, detected, similarity, snr = self._identify(db, tmp_path, assigned)
+                    event_type, detected, similarity, snr = self._identify(db, frame, occupying_person, assigned)
                     self._write_event(db, name, event_type, assigned, detected, similarity, snr)
                 # else: still occupied, within the heartbeat window -- no
                 # identification call this frame, matching the documented
