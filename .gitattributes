@@ -1,7 +1,8 @@
-# Store text as LF in the repo regardless of OS (Windows checkouts stop
-# warning "LF will be replaced by CRLF", and .sh scripts stay runnable on
-# the Lightning/Linux studio).
+# Repo stores text as LF. Windows launchers keep CRLF because cmd.exe
+# needs it; shell scripts must stay LF or bash fails on the stray \r.
 * text=auto eol=lf
+*.sh  text eol=lf
+*.bat text eol=crlf
 
 # Never touch binaries.
 *.pt   binary
@@ -10,3 +11,4 @@
 *.mp4  binary
 *.docx binary
 *.zip  binary
+*.woff2 binary

@@ -1,12 +1,27 @@
-# Test logs saved with: pytest ... 2>&1 | tee logs/<item>.txt
+# Per-machine files. Lightning and a local machine each keep their own copy;
+# none of this should travel through git, or a pull on one machine can
+# collide with (or overwrite) the other machine's data.
+
+# Environments and secrets
+.venv/
+venv/
+.env
+
+# Data the backend creates while running (paths are relative to backend/)
+backend/data.db
+backend/enrollment_photos/
+backend/datasets/
+backend/uploaded_videos/
+backend/video_clips/
+backend/annotated_videos/
+backend/logs/
+*.db
+*.sqlite3
+
+# Test logs saved with: pytest ... | tee logs/<item>.txt
 logs/
 
-# Python
+# Python and test caches
 __pycache__/
 *.pyc
 .pytest_cache/
-
-# Local secrets and databases
-.env
-*.db
-*.sqlite3
