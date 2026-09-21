@@ -205,7 +205,7 @@ async function runAiAnalysis() {
       loadAnalysisHistory();  // flips this run's status to "completed" with a real frame count
       ws.close();
     } else if (msg.type === 'error') {
-      document.getElementById('analysisStatusMsg').innerHTML += ` — <span style="color:#C0392B">${escapeHtml(msg.message)}</span>`;
+      document.getElementById('analysisStatusMsg').innerHTML += ` — <span class="error-text">${escapeHtml(msg.message)}</span>`;
     }
   };
   ws.onerror = () => { document.getElementById('analysisStatusMsg').innerHTML += ' — WebSocket error.'; };
@@ -307,7 +307,7 @@ async function loadAnalysisHistory() {
       const startedDate = (r.started_at || '').substring(0, 10);
       const frames = r.frames_processed != null ? r.frames_processed : '—';
       const viewBtn = r.status === 'completed'
-        ? `<button class="secondary" style="padding:4px 10px; font-size:11px" onclick="viewRunInAttendance('${startedDate}')">View</button>`
+        ? `<button class="secondary small" onclick="viewRunInAttendance('${startedDate}')">View</button>`
         : '';
       return `<tr>
         <td>${escapeHtml(r.filename)}</td>

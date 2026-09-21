@@ -3,31 +3,42 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sign in — UCT Workstation Monitor</title>
+<meta name="robots" content="noindex">
+<title>Sign in - UCT Workstation Monitor</title>
+<link rel="icon" href="assets/logo.png">
+<link rel="preload" href="fonts/barlow-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/login.css">
 </head>
 <body>
 
-<div id="loginScreen" class="login-wrap">
-  <div class="card login-card">
+<div id="loginScreen" class="login">
+  <section class="login-intro" aria-labelledby="introTitle">
     <img src="assets/logo.png" alt="UCT" onerror="this.style.display='none'">
-    <h2>Sign in to UCT Workstation Monitor</h2>
-    <div id="loginMsg"></div>
-    <div style="text-align:left">
-      <label>Username</label>
-      <input id="loginUsername" value="hr_admin1">
-      <label style="margin-top:10px">Password</label>
-      <input id="loginPassword" type="password" placeholder="see server console on first run">
+    <h1 id="introTitle">UCT Workstation Monitor</h1>
+    <p>Reads camera footage to show which desks are occupied and by whom. Faces are matched against enrolled employees, and the time each person spends at a desk or elsewhere in the room is recorded as attendance.</p>
+    <div class="status-grid" aria-label="Sample desk board">
+      <div class="status-tile MATCH"><div class="tile-name">Desk-A</div><div class="tile-sub">Active: MATCH</div></div>
+      <div class="status-tile VACANT"><div class="tile-name">Desk-B</div><div class="tile-sub">Vacant</div></div>
+      <div class="status-tile MISMATCH"><div class="tile-name">Desk-C</div><div class="tile-sub">Active: MISMATCH</div></div>
     </div>
-    <button class="primary" style="width:100%" onclick="doLogin()">Sign in</button>
-    <p class="hint">Default credentials are printed to the backend's console the first time it starts. Change them via DEFAULT_ADMIN_USERNAME / DEFAULT_ADMIN_PASSWORD in your .env.</p>
-    <p class="hint" id="loginApiTarget" style="word-break:break-all">Backend target: resolving…</p>
-    <p class="hint">
-      <a href="#" onclick="downloadAppLog(); return false;">Download debug log</a>
-      &nbsp;·&nbsp; If login fails, this log (plus your browser's devtools Console/Network tab) has the actual error.
-    </p>
-  </div>
+    <p class="sample-caption">Sample desk board with made-up desks, not live data.</p>
+  </section>
+
+  <section class="login-form" aria-labelledby="signInTitle">
+    <h2 id="signInTitle">Sign in</h2>
+    <div id="loginMsg" aria-live="polite"></div>
+    <form onsubmit="doLogin(); return false;">
+      <label for="loginUsername">Username</label>
+      <input id="loginUsername" value="hr_admin1" autocomplete="username">
+      <label for="loginPassword">Password</label>
+      <input id="loginPassword" type="password" placeholder="printed in the server console on first run" autocomplete="current-password">
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+    <p class="hint">The backend prints the default credentials to its console the first time it starts. To choose your own, set DEFAULT_ADMIN_USERNAME and DEFAULT_ADMIN_PASSWORD in your .env file.</p>
+    <p class="hint" id="loginApiTarget">Backend target: resolving…</p>
+    <p class="hint">If sign-in fails, <a href="#" onclick="downloadAppLog(); return false;">download the debug log</a>. Together with the browser console and Network tab, it shows the actual error.</p>
+  </section>
 </div>
 
 <script src="js/log.js"></script>

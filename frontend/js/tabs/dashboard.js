@@ -15,14 +15,14 @@ async function loadIdentityStatus() {
     const tiles = body.workstations.map(w => {
       const cls = w.occupancy_status === 'VACANT' ? 'VACANT' : w.match_status;
       const sub = w.occupancy_status === 'VACANT'
-        ? `Assigned: ${escapeHtml(w.assigned_employee_id) || '—'}`
-        : `${escapeHtml(w.match_status)}${w.detected_employee_id ? ' · ' + escapeHtml(w.detected_employee_id) : ''}`;
+        ? (w.assigned_employee_id ? `Vacant, assigned to ${escapeHtml(w.assigned_employee_id)}` : 'Vacant, no one assigned')
+        : `${escapeHtml(w.match_status)}${w.detected_employee_id ? ': ' + escapeHtml(w.detected_employee_id) : ''}`;
       return `<div class="status-tile ${cls}">
         <div class="tile-name">${escapeHtml(w.name)}</div>
-        <div class="tile-sub">${w.occupancy_status === 'VACANT' ? 'Vacant' : 'Active'} — ${sub}</div>
+        <div class="tile-sub">${sub}</div>
       </div>`;
     }).join('');
-    document.getElementById('statusGrid').innerHTML = tiles || '<p class="hint">No workstations yet — add one in the Workstations tab.</p>';
+    document.getElementById('statusGrid').innerHTML = tiles || '<p class="hint">No workstations yet. Add one in the Workstations section.</p>';
 
     const rows = body.workstations.map(w => `<tr>
       <td>${escapeHtml(w.name)}</td><td>${escapeHtml(w.occupancy_status)}</td><td>${escapeHtml(w.assigned_employee_id)||'—'}</td>

@@ -92,8 +92,16 @@ async function logout() {
 function showTab(name) {
   document.querySelectorAll('main section').forEach(s => s.style.display = 'none');
   document.getElementById('tab-'+name).style.display = 'block';
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-  event.target.classList.add('active');
+  // The active button is looked up by its data-tab, not taken from
+  // event.target: viewRunInAttendance() calls showTab() from a click on a
+  // "View" button inside a table, and event.target there would have marked
+  // that table button as the active section.
+  document.querySelectorAll('nav button').forEach(b => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+  });
+  window.scrollTo(0, 0);
 }
 
 document.addEventListener('DOMContentLoaded', restoreSession);

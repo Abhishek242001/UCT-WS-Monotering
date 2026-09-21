@@ -24,15 +24,15 @@ function drawRoiCanvas() {
   if (roiImg) ctx.drawImage(roiImg, 0, 0, canvas.width, canvas.height);
   ctx.font = '13px sans-serif';
   for (const b of savedRoiBoxes) {
-    ctx.strokeStyle = '#1E9E57'; ctx.lineWidth = 2;
+    ctx.strokeStyle = '#1F8A55'; ctx.lineWidth = 2;
     ctx.strokeRect(b.x, b.y, b.w, b.h);
-    ctx.fillStyle = '#1E9E57';
+    ctx.fillStyle = '#1F8A55';
     ctx.fillRect(b.x, Math.max(0, b.y - 18), ctx.measureText(b.name).width + 8, 18);
     ctx.fillStyle = '#fff';
     ctx.fillText(b.name, b.x + 4, Math.max(13, b.y - 5));
   }
   if (roiRect) {
-    ctx.strokeStyle = '#5D5FEF'; ctx.lineWidth = 2;
+    ctx.strokeStyle = '#2A29A3'; ctx.lineWidth = 2;
     ctx.strokeRect(roiRect.x, roiRect.y, roiRect.w, roiRect.h);
   }
 }

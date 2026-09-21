@@ -1,5 +1,28 @@
-/* login.css — login.html only. */
+/* login.css -- login.html only. Two columns: what this system does (with a
+   sample of the desk board it produces) and the sign-in form. */
 
-.login-wrap{ display:flex; align-items:center; justify-content:center; height:80vh; }
-.login-card{ width:340px; text-align:center; }
-.login-card img{ height:52px; margin-bottom:16px; }
+.login{ min-height:100vh; display:grid; grid-template-columns:minmax(0, 1.15fr) minmax(320px, 480px); }
+.login-intro{
+  background:var(--ground); border-right:1px solid var(--rule);
+  padding:56px 56px 40px; display:flex; flex-direction:column; justify-content:center; gap:22px;
+}
+.login-intro img{ width:132px; height:132px; margin:-46px -30px -40px; object-fit:contain; mix-blend-mode:multiply; align-self:flex-start; }
+.login-intro h1{ font-size:34px; line-height:1.1; }
+.login-intro p{ max-width:56ch; margin:0; }
+.sample-caption{ font-size:13.5px; color:var(--ink-2); margin-top:-12px; }
+.login-intro .status-grid{ max-width:560px; grid-template-columns:repeat(3, 1fr); }
+
+.login-form{ background:var(--surface); padding:56px 44px; display:flex; flex-direction:column; justify-content:center; }
+.login-form h2{ font-size:26px; margin-bottom:18px; }
+.login-form label{ margin-top:14px; }
+.login-form button.primary{ width:100%; margin-top:22px; padding:10px 16px; }
+.login-form .hint{ margin-top:14px; }
+.login-form #loginApiTarget{ word-break:break-all; }
+
+@media (max-width: 860px){
+  .login{ display:block; }
+  .login-intro{ padding:28px 20px; gap:14px; border-right:none; border-bottom:1px solid var(--rule); }
+  .login-intro h1{ font-size:26px; }
+  .login-intro .status-grid{ grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); }
+  .login-form{ padding:28px 20px 40px; }
+}

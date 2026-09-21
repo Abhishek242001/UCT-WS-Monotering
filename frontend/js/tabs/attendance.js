@@ -26,11 +26,11 @@ async function checkToday() {
 async function loadLiveNow() {
   try {
     const body = await api(`/attendance/live_now?org_id=${getOrgId()}`);
-    const tiles = body.employees.map(e => `<div class="status-tile MATCH">
+    const tiles = body.employees.map(e => `<div class="status-tile ${e.status === 'ON_BREAK' ? 'ON_BREAK' : 'MATCH'}">
       <div class="tile-name">${escapeHtml(e.name)} (${escapeHtml(e.employee_id)})</div>
-      <div class="tile-sub">${escapeHtml(e.status)} — ${escapeHtml(e.last_seen_workstation) || '—'}</div>
+      <div class="tile-sub">${escapeHtml(e.status)}, last seen ${escapeHtml(e.last_seen_workstation) || 'nowhere yet'}</div>
     </div>`).join('');
-    document.getElementById('liveNowGrid').innerHTML = tiles || '<p class="hint">No one currently present.</p>';
+    document.getElementById('liveNowGrid').innerHTML = tiles || '<p class="hint">No one is present right now.</p>';
   } catch (e) { showMsg('liveNowMsg', e.message, false); }
 }
 
@@ -49,7 +49,7 @@ async function loadEmployeeStats() {
 
     const rows = body.days.map(d => {
       const hours = d.net_present_seconds != null ? (d.net_present_seconds / 3600).toFixed(2) : '—';
-      return `<tr onclick="document.getElementById('timelineDate').value='${escapeHtml(d.date)}'; loadDailyTimeline();" style="cursor:pointer">
+      return `<tr tabindex="0" onclick="document.getElementById('timelineDate').value='${escapeHtml(d.date)}'; loadDailyTimeline();" onkeydown="if(event.key==='Enter'){this.click();}">
         <td>${escapeHtml(d.date)}</td><td>${escapeHtml(d.sign_in_time)||'—'}</td><td>${escapeHtml(d.sign_out_time)||'—'}</td>
         <td><span class="badge ${d.status}">${escapeHtml(d.status)}</span></td><td>${hours}</td>
         <td>${escapeHtml(d.day_classification) || '—'}</td></tr>`;
