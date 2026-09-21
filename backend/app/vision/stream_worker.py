@@ -45,7 +45,7 @@ from app import database as db_module
 from app.models import Workstation, WorkstationAssignment, WorkstationIdentityEvent, EmployeeFaceGallery, Employee, VideoAnalysisRun
 from app import logic
 from app.routers import attendance
-from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate, face_crop
+from app.vision import yolo_detector, face_embedder, event_bus, frame_annotate, face_crop, capture
 
 HEARTBEAT_SECONDS = int(os.environ.get("IDENTIFY_HEARTBEAT_SECONDS", 60))
 
@@ -143,16 +143,29 @@ class StreamWorker(threading.Thread):
     def stop(self):
         self._stop_event.set()
 
+    def _on_source_status(self, info: dict):
+        """Called from the RTSP reader thread when the camera connection is
+        lost ("reconnecting") or comes back ("connected")."""
+        print(f"[stream_worker] {capture.mask_credentials(self.source)}: {info}")
+        self._publish({"type": "source_status", **info})
+
     def _publish(self, message: dict):
         if self.stream_id and self.loop:
             event_bus.publish(self.stream_id, message, self.loop)
 
     def run(self):
-        cap = cv2.VideoCapture(self.source)
+        # Files open as a plain cv2.VideoCapture, exactly as before. An
+        # rtsp:// source gets a reader thread that keeps only the newest
+        # frame, applies read timeouts and reconnects when the camera
+        # drops (see app/vision/capture.py).
+        cap = capture.open_frame_source(self.source, stop_event=self._stop_event,
+                                        on_status=self._on_source_status)
         self.source_opened = cap.isOpened()
         if not self.source_opened:
-            print(f"[stream_worker] Could not open source: {self.source}")
-            self._publish({"type": "error", "message": f"Could not open source: {self.source}"})
+            # RTSP URLs often carry user:password -- never log or publish them.
+            safe_source = capture.mask_credentials(self.source)
+            print(f"[stream_worker] Could not open source: {safe_source}")
+            self._publish({"type": "error", "message": f"Could not open source: {safe_source}"})
             self._publish({"type": "completed", "frames_processed": 0, "reason": "source_not_opened"})
             return
 

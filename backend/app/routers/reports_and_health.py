@@ -77,10 +77,14 @@ def system_health(org_id: int, db: Session = Depends(get_db), admin: AdminSessio
     mp4v_writer_ok = False
     try:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        test_writer = cv2.VideoWriter("/tmp/_health_check_mp4v.mp4", fourcc, 20.0, (64, 64))
+        # The OS temp dir, not a hard-coded /tmp (which does not exist on Windows).
+        import tempfile
+        health_path = os.path.join(tempfile.gettempdir(), "_health_check_mp4v.mp4")
+        test_writer = cv2.VideoWriter(health_path, fourcc, 20.0, (64, 64))
         mp4v_writer_ok = test_writer.isOpened()
         test_writer.release()
-        os.remove("/tmp/_health_check_mp4v.mp4") if os.path.exists("/tmp/_health_check_mp4v.mp4") else None
+        if os.path.exists(health_path):
+            os.remove(health_path)
     except Exception:
         pass
 

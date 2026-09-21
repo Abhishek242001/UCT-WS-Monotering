@@ -31,6 +31,10 @@ function _connectLivePreview(streamId) {
     if (data.type === 'frame') {
       img.src = data.image;
       msg.textContent = `Live — frame ${data.frame_number}`;
+    } else if (data.type === 'source_status') {
+      msg.textContent = data.state === 'reconnecting'
+        ? `Camera connection lost. Reconnecting (attempt ${data.attempt})…`
+        : 'Camera reconnected.';
     } else if (data.type === 'error') {
       msg.textContent = 'Error: ' + data.message;
     } else if (data.type === 'completed') {
