@@ -22,6 +22,7 @@ from app import security
 from app.routers import (
     streams, workstations, employees, dataset_calibration, attendance,
     admin_auth, shifts_breaks_calendar, reports_and_health, videos, streams_ws,
+    enrollment_rtsp,
 )
 
 app = FastAPI(
@@ -101,6 +102,7 @@ app.include_router(shifts_breaks_calendar.router)
 app.include_router(reports_and_health.router)
 app.include_router(videos.router)
 app.include_router(streams_ws.router)
+app.include_router(enrollment_rtsp.router)
 
 # NOTE: "/" (used by the frontend's checkBackend() as a liveness check) is
 # already defined in routers/streams.py's health() -- no separate root

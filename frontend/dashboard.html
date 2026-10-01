@@ -146,6 +146,87 @@
     </div>
 
     <div class="card">
+      <h2>Enroll from a live RTSP camera</h2>
+      <p class="hint">Enter the employee's details, connect to an RTSP camera (or a server-side video file path, for testing) to see it live on this page, then capture each view at each distance directly from the feed instead of uploading photos. Uses the same distance set as "Enroll from a dataset zip" above, and the same "Train model" button below picks these captures up too.</p>
+
+      <div class="row">
+        <div><label for="rtspEmpId">Employee ID</label><input id="rtspEmpId" placeholder="EMP-1001"></div>
+        <div><label for="rtspEmpName">Name</label><input id="rtspEmpName" placeholder="Jane Doe"></div>
+        <div><label for="rtspEmpDept">Department</label><input id="rtspEmpDept" placeholder="e.g. Engineering"></div>
+      </div>
+
+      <div class="row">
+        <div><label for="rtspEnrollSource">RTSP URL (or server-side file path)</label><input id="rtspEnrollSource" placeholder="rtsp://user:pass@camera-host/stream"></div>
+      </div>
+      <button class="primary" id="rtspConnectBtn" onclick="connectRtspEnrollment()">Connect &amp; preview</button>
+      <button class="secondary" id="rtspDisconnectBtn" onclick="disconnectRtspEnrollment()" style="display:none">Disconnect</button>
+      <div id="rtspConnectMsg" aria-live="polite"></div>
+
+      <div style="display:flex;gap:20px;flex-wrap:wrap;margin-top:10px">
+        <!-- Left: stream + capture controls. Always visible, right below
+             the form -- not gated behind a successful connect, so a
+             failed/pending connection is obvious here instead of the page
+             looking like nothing happened. -->
+        <div style="flex:2;min-width:320px">
+          <img id="rtspPreviewImg" class="live-preview" alt="">
+          <div id="rtspPreviewMsg" class="hint">Not connected yet. Fill in the employee details and an RTSP URL above, then click "Connect &amp; preview".</div>
+
+          <div id="rtspEnrollPanel" style="display:none">
+            <div id="rtspDistancesWrap"></div>
+
+            <div class="row">
+              <div>
+                <label for="rtspDistance">Step 1 — Distance</label>
+                <select id="rtspDistance" onchange="_updateRtspInstruction()"></select>
+              </div>
+              <div>
+                <label for="rtspView">Step 2 — View / pose</label>
+                <select id="rtspView" onchange="_updateRtspInstruction()">
+                  <option value="front">front — look straight at the camera</option>
+                  <option value="left">left — turn to show the left side of the face</option>
+                  <option value="right">right — turn to show the right side of the face</option>
+                  <option value="top">top — tilt the chin down slightly</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="notice" id="rtspCaptureInstruction">Choose a distance above to begin.</div>
+
+            <label style="display:flex;align-items:center;gap:6px;font-weight:normal;margin:8px 0">
+              <input type="checkbox" id="rtspForceNoFace"> Save this capture even if no face is detected in it
+            </label>
+
+            <button class="primary" onclick="startRtspCapture()">Capture this view &amp; distance</button>
+            <div id="rtspCaptureMsg" aria-live="polite"></div>
+
+            <!-- Every capture goes through this review step before it's
+                 saved: freezes the current frame, pre-fills the crop box
+                 from automatic detection when one was found (a default
+                 centered box otherwise), and lets the admin drag/resize it
+                 by hand -- so a bad auto-crop can be fixed, and a frame
+                 automatic detection can't handle at all can still be
+                 cropped manually, before anything is written to disk. -->
+            <div id="rtspCropEditor" style="display:none;margin-top:10px">
+              <p class="hint">Is this crop OK, or does it need adjusting? Drag inside the box to move it, or drag a corner to resize it, so it tightly frames the face. Then confirm.</p>
+              <canvas id="rtspCropCanvas" style="max-width:100%;border:1px solid var(--rule);cursor:crosshair;touch-action:none"></canvas>
+              <div style="margin-top:8px">
+                <button class="primary" onclick="confirmManualCropRtsp()">✓ Looks good — save</button>
+                <button class="secondary" onclick="cancelManualCropRtsp()">✕ Discard</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: distance-wise gallery of what's been captured so far
+             for the employee currently connected. -->
+        <div style="flex:1;min-width:220px">
+          <h3 style="margin-top:0">Captured photos</h3>
+          <div id="rtspCapturedGallery" class="hint">Nothing captured yet.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Train model</h2>
       <p class="hint">Fits the distance-matching curve (near_k and near_sigma0) from every employee enrolled by zip who has two or more distances. Safe to run again, for example after enrolling more people.</p>
       <button class="primary" onclick="runCalibrationAll()">Train model</button>
@@ -396,15 +477,20 @@
 </main>
 </div>
 
-<script src="js/log.js"></script>
-<script src="js/api.js"></script>
-<script src="js/tabs/dashboard.js"></script>
-<script src="js/tabs/workstations.js"></script>
-<script src="js/tabs/employees.js"></script>
-<script src="js/tabs/detect.js"></script>
-<script src="js/tabs/livestream.js"></script>
-<script src="js/tabs/videoanalysis.js"></script>
-<script src="js/tabs/attendance.js"></script>
-<script src="js/dashboard.page.js"></script>
+<!-- ?v= busts browser caching of these files across edits -- without it,
+     a browser can end up running an old cached .js file alongside a
+     freshly-loaded dashboard.html, which throws confusing "Cannot set
+     properties of null" errors when the two reference different element
+     IDs. Bump this value whenever any of these files change. -->
+<script src="js/log.js?v=20260930d"></script>
+<script src="js/api.js?v=20260930d"></script>
+<script src="js/tabs/dashboard.js?v=20260930d"></script>
+<script src="js/tabs/workstations.js?v=20260930d"></script>
+<script src="js/tabs/employees.js?v=20260930d"></script>
+<script src="js/tabs/detect.js?v=20260930d"></script>
+<script src="js/tabs/livestream.js?v=20260930d"></script>
+<script src="js/tabs/videoanalysis.js?v=20260930d"></script>
+<script src="js/tabs/attendance.js?v=20260930d"></script>
+<script src="js/dashboard.page.js?v=20260930d"></script>
 </body>
 </html>
