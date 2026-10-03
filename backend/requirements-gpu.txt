@@ -1,0 +1,48 @@
+# Optional: install this AFTER requirements.txt to put real inference on
+# an NVIDIA GPU instead of CPU. Same role requirements-face-recognition.txt
+# used to play before it got merged into requirements.txt: strictly
+# additive, nothing breaks if you skip this file.
+#
+# WHY THIS HAS TO BE SEPARATE: torch's CUDA builds are published on
+# PyTorch's own package index, not plain PyPI, and the exact CUDA build
+# you need (cu121/cu126/cu128/...) depends on what YOUR driver supports --
+# there's no single version that's correct on every machine, so this file
+# documents the command rather than a fixed pin pip can just resolve.
+#
+# HOW TO CHECK WHICH BUILD YOU NEED:
+#   1. Run `nvidia-smi`. The "CUDA Version" it reports is the MAXIMUM
+#      your driver supports, not a version you need to match exactly --
+#      pick the newest available PyTorch CUDA build at or below it.
+#   2. Check https://pytorch.org/get-started/locally/ for current options
+#      (as of this writing: cu126, cu128, cu130). If yours differs from
+#      cu128 below, change the --extra-index-url line to match.
+#
+# VERIFIED WORKING in this project's own build (Windows, NVIDIA RTX A5000,
+# driver reporting CUDA 12.8): torch 2.11.0+cu128, torchvision 0.26.0+cu128,
+# onnxruntime-gpu 1.30.0 -- confirmed afterward that torch.cuda.is_available()
+# is True and onnxruntime lists both CUDAExecutionProvider and
+# TensorrtExecutionProvider as available.
+#
+# USAGE:
+#   pip install -r requirements-gpu.txt --no-cache-dir
+#
+# DISK SPACE WARNING: the torch wheel alone is ~2.8GB to download, and
+# needs real free space to install, not just to download -- pip extracts
+# into your SYSTEM temp folder (not your project folder) regardless of
+# --no-cache-dir, which on Windows is usually on the C: drive even if your
+# project and conda env are on a different drive. Check actual free space
+# on whichever drive your conda env lives on (`where python`, then
+# `Get-PSDrive <that letter>`) before running this -- running out of
+# space mid-install can leave torch partially uninstalled and needing a
+# clean retry, not just a resume.
+#
+# Do not also leave plain `onnxruntime` (CPU) installed once this is
+# applied -- onnxruntime and onnxruntime-gpu share the same import name,
+# same class of silent conflict as opencv-python vs opencv-python-headless
+# documented in requirements.txt.
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch
+torchvision
+onnxruntime-gpu

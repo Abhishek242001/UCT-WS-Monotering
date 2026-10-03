@@ -1,6 +1,15 @@
 # Core backend -- verified installable and working in a constrained
 # environment (no GPU, limited disk). Real YOLO person detection works
 # out of the box with these.
+#
+# IMPORTANT -- CPU vs GPU: `pip install -r requirements.txt` alone gives
+# you the CPU-only build of torch on Windows (ultralytics pulls torch in
+# transitively, and plain PyPI resolves to the CPU wheel on Windows --
+# this is a platform quirk, not a version-pinning mistake here). If this
+# machine has an NVIDIA GPU, run requirements-gpu.txt AFTER this file --
+# see that file for why it has to be separate and how to pick the right
+# CUDA build for your driver. Skipping it isn't broken, just slow:
+# YOLO/InsightFace will both run correctly on CPU, only much slower.
 
 fastapi==0.141.1
 uvicorn[standard]==0.34.0
@@ -9,7 +18,24 @@ pydantic==2.10.0
 python-multipart==0.0.20
 numpy>=1.26
 scipy>=1.11
+
+# VERIFIED (this project, Oct 2026): numpy 2.4.6 + torch 2.11/2.14 import
+# cleanly with no ABI warning -- the once-common "module compiled using
+# NumPy 1.x cannot run in NumPy 2.x" break does not apply to current
+# torch releases. numpy is left unpinned on the upper end deliberately;
+# tighten this only if a future torch/numpy pairing actually breaks it.
+
+# ONLY install opencv-python-headless, never opencv-python alongside it --
+# both provide the same `cv2` import name, pip does NOT treat installing
+# both as a conflict, and which one actually wins at import time is
+# undefined. This bit a real setup once already (Oct 2026): something in
+# this environment pulled in plain opencv-python alongside the headless
+# one already here, and it went unnoticed until explicitly checked for.
+# ultralytics' own package metadata asks for "opencv-python" by name --
+# that's a harmless pip resolver warning, not a real missing dependency,
+# since the actual import (`cv2`) is satisfied by the headless package.
 opencv-python-headless>=4.9
+
 ultralytics>=8.3
 lap>=0.5.12  # required by Ultralytics' ByteTrack tracker (model.track()); without this pinned, it silently auto-installs at runtime on first use
 
@@ -29,6 +55,10 @@ lap>=0.5.12  # required by Ultralytics' ByteTrack tracker (model.track()); witho
 # person re-extracted: cosine similarity 1.0; two different people: ~-0.03.
 insightface>=0.7.3
 onnxruntime>=1.19
+# ^ CPU-only build, the safe default. If you installed requirements-gpu.txt,
+# that file replaces this with onnxruntime-gpu -- do not have both
+# onnxruntime and onnxruntime-gpu installed at once (same class of
+# conflict as the opencv one above: same import name, undefined which wins).
 
 # Testing
 pytest==9.1.1
