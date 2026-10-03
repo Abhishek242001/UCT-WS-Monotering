@@ -81,17 +81,32 @@ def decide_match_status(
     is_assigned_employee: Optional[bool],
     sim_threshold: float = 0.45,
     snr_threshold: float = 3.0,
+    face_width_px: Optional[float] = None,
 ) -> MatchStatus:
     """Central decision function for the four workstation identity states.
     Kept deliberately conservative: a low SNR always yields UNKNOWN, even
     if the raw similarity looks superficially high, per the "honesty over
     false confidence" design principle documented for ADAR.
+
+    face_width_px, when provided, gates the decision through the
+    confidence zone the crop falls into (see classify_confidence_zone) --
+    mirrors app/logic.py exactly; see that copy's docstring for the full
+    reasoning. Backward compatible: omitting it reproduces prior behavior.
     """
     if not occupancy_present:
         return MatchStatus.VACANT
     if best_similarity is None or best_snr is None:
         return MatchStatus.UNKNOWN
-    if best_similarity < sim_threshold or best_snr < snr_threshold:
+
+    effective_sim_threshold = sim_threshold
+    if face_width_px is not None:
+        zone = classify_confidence_zone(face_width_px)
+        if zone == "unreliable":
+            return MatchStatus.UNKNOWN
+        if zone == "degraded":
+            effective_sim_threshold = max(sim_threshold, 0.60)
+
+    if best_similarity < effective_sim_threshold or best_snr < snr_threshold:
         return MatchStatus.UNKNOWN
     return MatchStatus.MATCH if is_assigned_employee else MatchStatus.MISMATCH
 

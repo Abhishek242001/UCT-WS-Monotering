@@ -91,13 +91,21 @@ def test_single_frame_blip_produces_no_identification_event(client, admin_token,
     import numpy as np
     import sqlite3
     import os
+    import tempfile
     from app.vision.stream_worker import StreamWorker
 
     photo = cv2.imread(sample_photo_path)
     h, w = photo.shape[:2]
     blank = np.full((h, w, 3), 40, dtype="uint8")
 
-    path = "/tmp/hysteresis_blip_test.mp4"
+    # Hardcoded "/tmp/..." doesn't resolve to a valid, writable path on
+    # Windows (cv2.VideoWriter silently writes nowhere useful, then
+    # cv2.VideoCapture fails to open the same path -- "Could not open
+    # source" -- so the stream never processes a single frame and the
+    # test sees zero events instead of the expected one). Same class of
+    # bug already fixed once in reports_and_health.py's health check;
+    # this one slipped through in the test suite itself.
+    path = os.path.join(tempfile.gettempdir(), "hysteresis_blip_test.mp4")
     writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 5, (w, h))
     for _ in range(3):
         writer.write(blank)

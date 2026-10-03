@@ -34,7 +34,6 @@ jitter/bandwidth.
 import base64
 import math
 import os
-import tempfile
 import threading
 import time
 from datetime import datetime
@@ -94,6 +93,17 @@ LIVE_FRAME_JPEG_QUALITY = int(os.environ.get("LIVE_FRAME_JPEG_QUALITY", 70))
 # logic.py are already flagged as needing real calibration data.
 ACTIVITY_MOVING_THRESHOLD_PER_SEC = float(os.environ.get("ACTIVITY_MOVING_THRESHOLD_PER_SEC", 0.05))
 
+# How long an in-memory copy of the org's face gallery is reused before
+# being re-queried from the database (see StreamWorker._get_gallery()).
+# The gallery is small (a handful of employees x 4 views) and changes only
+# on enrollment/removal, so re-querying it on every single identify() call
+# was wasted DB round-trips, not a correctness requirement. 300s (5 min)
+# means a freshly re-enrolled employee's corrected embedding takes at most
+# this long to take effect on an already-running stream; restarting the
+# stream (which discards this cache along with the rest of the worker's
+# state) always picks up the latest gallery immediately.
+GALLERY_CACHE_TTL_SECONDS = float(os.environ.get("GALLERY_CACHE_TTL_SECONDS", 300))
+
 
 class StreamWorker(threading.Thread):
     def __init__(self, source: str, org_id: int, cam_id: int,
@@ -137,6 +147,7 @@ class StreamWorker(threading.Thread):
         self._last_identity_by_track: dict[int, tuple] = {}  # track_id -> (event_type, detected_employee_id, employee_name, similarity), so a person's own box label follows them, not their workstation's rectangle
         self._last_employee_name: dict[str, str | None] = {}  # workstation_name -> employee_name from the most recent MATCH/MISMATCH, paired with _last_result
         self._last_room_record_time: dict[int, float] = {}  # track_id -> monotonic time, heartbeat for "in room, not at desk" attendance segments
+        self._gallery_cache: dict | None = None  # {"grouped": ..., "names": {employee_id: name}, "loaded_at": monotonic time} -- see _get_gallery()
         self._pending_occupancy: dict[str, str] = {}       # workstation_name -> raw status currently being tracked toward a hysteresis commit
         self._pending_occupancy_count: dict[str, int] = {}  # workstation_name -> consecutive frames the pending status has held
 
@@ -316,30 +327,48 @@ class StreamWorker(threading.Thread):
         """
         crop_path = face_crop.crop_person_region(frame, occupying_person)
         try:
-            live_embedding, _width_px = face_embedder.extract_embedding(crop_path)
+            live_embedding, width_px = face_embedder.extract_embedding(crop_path)
         except ValueError:
             return "UNKNOWN", None, None, None, None  # occupied per YOLO, but no face found in the cropped region
         finally:
             os.unlink(crop_path)
 
-        gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == self.org_id).all()
-        gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
-        grouped = logic.group_gallery_by_person(gallery)
+        grouped, gallery_names = self._get_gallery(db)
         best = logic.match_single_pass(live_embedding, grouped)
 
         if best is None:
             return "UNKNOWN", None, None, None, None
 
         detected_employee_id, _view, similarity = best
-        employee_name = next((row.employee.name for row in gallery_rows if row.employee_id == detected_employee_id), None)
+        employee_name = gallery_names.get(detected_employee_id)
         snr = similarity * 10  # placeholder scale pending a fitted per-employee decay curve
         status = logic.decide_match_status(
             occupancy_present=True, best_similarity=similarity, best_snr=snr,
             is_assigned_employee=(detected_employee_id == assigned_employee_id),
+            face_width_px=width_px,
         )
         if status == logic.MatchStatus.UNKNOWN:
             detected_employee_id = None
         return status.value, detected_employee_id, similarity, snr, employee_name
+
+    def _get_gallery(self, db) -> tuple[dict, dict]:
+        """Returns (grouped_gallery, employee_names_by_id) for this org,
+        reusing an in-memory copy for GALLERY_CACHE_TTL_SECONDS instead of
+        re-querying the database on every single identify() call. See the
+        constant's comment above for why this is safe at this org's scale
+        and what "stale" means here in practice.
+        """
+        now = time.monotonic()
+        if self._gallery_cache is not None and (now - self._gallery_cache["loaded_at"]) < GALLERY_CACHE_TTL_SECONDS:
+            return self._gallery_cache["grouped"], self._gallery_cache["names"]
+
+        gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == self.org_id).all()
+        gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
+        grouped = logic.group_gallery_by_person(gallery)
+        names = {row.employee_id: row.employee.name for row in gallery_rows}
+
+        self._gallery_cache = {"grouped": grouped, "names": names, "loaded_at": now}
+        return grouped, names
 
     def _update_position_and_check_moving(self, person, now: float) -> bool:
         """Tracks this person's approximate body position across frames
@@ -474,138 +503,137 @@ class StreamWorker(threading.Thread):
         )
 
     def _process_frame(self, db, frame, rois: dict[str, dict], pose_model):
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            cv2.imwrite(tmp.name, frame)
-            tmp_path = tmp.name
+        # Previously wrote every frame to a temp JPEG and had YOLO read it
+        # back -- pure round-trip overhead, since Ultralytics accepts an
+        # ndarray directly (see yolo_detector.detect_and_track_people's
+        # docstring). Measured ~19ms/frame on Linux for the round trip vs
+        # ~17ms passing the array directly; likely worse on Windows given
+        # antivirus file-lock symptoms seen elsewhere in this project.
+        people = yolo_detector.detect_and_track_people(pose_model, frame)
+        now = time.monotonic()
+        occupied_track_ids = set()  # track_ids currently occupying SOME workstation this frame -- excluded from the room-presence pass below (item 7), since they're already covered as desk time, not room time
 
-        try:
-            people = yolo_detector.detect_and_track_people(pose_model, tmp_path)
-            now = time.monotonic()
-            occupied_track_ids = set()  # track_ids currently occupying SOME workstation this frame -- excluded from the room-presence pass below (item 7), since they're already covered as desk time, not room time
+        for name, roi in rois.items():
+            # best_overlapping_person applies the same overlap gate as
+            # boxes_overlap (used everywhere else in this loop) but
+            # also resolves WHICH person occupies this specific ROI,
+            # which _identify needs to crop to the right face -- see
+            # its docstring for why that matters even in the
+            # single-workstation case, and doubly so with more than
+            # one occupied desk in frame.
+            occupying_person = face_crop.best_overlapping_person(people, roi)
+            occupied = occupying_person is not None
+            if occupied and occupying_person.track_id is not None:
+                occupied_track_ids.add(occupying_person.track_id)
+            raw_status = "ACTIVE" if occupied else "VACANT"
+            previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
+            new_status = self._apply_occupancy_hysteresis(name, raw_status)
+            assigned = self._assigned_employee(db, name)
 
-            for name, roi in rois.items():
-                # best_overlapping_person applies the same overlap gate as
-                # boxes_overlap (used everywhere else in this loop) but
-                # also resolves WHICH person occupies this specific ROI,
-                # which _identify needs to crop to the right face -- see
-                # its docstring for why that matters even in the
-                # single-workstation case, and doubly so with more than
-                # one occupied desk in frame.
-                occupying_person = face_crop.best_overlapping_person(people, roi)
-                occupied = occupying_person is not None
-                if occupied and occupying_person.track_id is not None:
-                    occupied_track_ids.add(occupying_person.track_id)
-                raw_status = "ACTIVE" if occupied else "VACANT"
-                previous_status = self._last_occupancy.get(name)  # None on the very first frame seen
-                new_status = self._apply_occupancy_hysteresis(name, raw_status)
-                assigned = self._assigned_employee(db, name)
+            status_changed = previous_status != new_status  # True only on a genuinely COMMITTED transition (or the first frame), not every raw flip
+            heartbeat_due = (now - self._last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
 
-                status_changed = previous_status != new_status  # True only on a genuinely COMMITTED transition (or the first frame), not every raw flip
-                heartbeat_due = (now - self._last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
-
-                if new_status == "VACANT":
-                    # Previously wrote+published a VACANT event on EVERY
-                    # not-occupied frame, with no de-duplication -- for a
-                    # multi-minute video at poll_interval_seconds=0 this
-                    # floods both the DB and the WebSocket with thousands
-                    # of identical lines, which is what made the frontend
-                    # event log look frozen/unresponsive. Now debounced
-                    # exactly like the ACTIVE/identify path below: only on
-                    # a real transition, or the same slow heartbeat.
-                    if status_changed or heartbeat_due:
-                        self._last_identify_time[name] = now
-                        self._write_event(db, name, "VACANT", assigned, None, None, None)
-                    continue
-
-                if occupying_person is None:
-                    # Committed status is still ACTIVE (hysteresis hasn't
-                    # let a momentary empty frame flip it to VACANT yet
-                    # -- e.g. a brief occlusion), but there is genuinely
-                    # no one to crop/identify THIS specific frame. Keep
-                    # reporting ACTIVE (the desk still reads as occupied,
-                    # correctly, since the person hasn't actually left
-                    # long enough to count), just skip identification
-                    # until a real detection reappears.
-                    continue
-
-
-                # Event-driven identification trigger (Section 3.2): fire
-                # on a VACANT -> ACTIVE transition, or on a heartbeat
-                # thereafter -- never on every frame. The heartbeat
-                # interval is dynamic: the normal baseline, or a faster
-                # retry if the last result here was UNKNOWN -- see
-                # _identify_retry_interval_seconds(). Deliberately a
-                # SEPARATE check from the VACANT path's heartbeat_due
-                # above: that one governs how often to re-publish/re-write
-                # a VACANT event (unrelated to identification confidence)
-                # and must stay on the fixed baseline, not the dynamic one.
-                identify_retry_due = (now - self._last_identify_time.get(name, -1e9)) \
-                    >= self._identify_retry_interval_seconds(name)
-                if status_changed or identify_retry_due:
+            if new_status == "VACANT":
+                # Previously wrote+published a VACANT event on EVERY
+                # not-occupied frame, with no de-duplication -- for a
+                # multi-minute video at poll_interval_seconds=0 this
+                # floods both the DB and the WebSocket with thousands
+                # of identical lines, which is what made the frontend
+                # event log look frozen/unresponsive. Now debounced
+                # exactly like the ACTIVE/identify path below: only on
+                # a real transition, or the same slow heartbeat.
+                if status_changed or heartbeat_due:
                     self._last_identify_time[name] = now
-                    event_type, detected, similarity, snr, employee_name = self._identify(db, frame, occupying_person, assigned)
-                    self._write_event(db, name, event_type, assigned, detected, similarity, snr)
-                    self._last_employee_name[name] = employee_name
+                    self._write_event(db, name, "VACANT", assigned, None, None, None)
+                continue
 
-                    # Attendance recording -- real tables for a genuinely
-                    # live stream, simulated tables (item 8) otherwise --
-                    # and only on an actual confirmed MATCH, never on
-                    # MISMATCH or UNKNOWN: attendance is about tracking a
-                    # real (or, for a demo run, a real-looking simulated)
-                    # employee presence, not logging every inconclusive
-                    # glance at a desk.
-                    if event_type == "MATCH" and detected:
-                        record_fn = attendance.record_detection_core if self.is_live else attendance.record_simulated_detection_core
-                        try:
-                            record_fn(
-                                db, self.org_id, detected, cam_id=self.cam_id,
-                                location=name, timestamp=datetime.utcnow(),
-                            )
-                        except Exception as e:
-                            # Attendance recording must never take down
-                            # the detection loop itself -- a DB hiccup
-                            # here shouldn't stop occupancy/identification
-                            # from continuing to work and being logged.
-                            print(f"[stream_worker] attendance recording failed for {detected} at {name}: {e}")
-                # else: still occupied, within the current interval -- no
-                # identification call this frame, matching the documented
-                # "tens of calls per day, not per frame" design goal.
+            if occupying_person is None:
+                # Committed status is still ACTIVE (hysteresis hasn't
+                # let a momentary empty frame flip it to VACANT yet
+                # -- e.g. a brief occlusion), but there is genuinely
+                # no one to crop/identify THIS specific frame. Keep
+                # reporting ACTIVE (the desk still reads as occupied,
+                # correctly, since the person hasn't actually left
+                # long enough to count), just skip identification
+                # until a real detection reappears.
+                continue
 
-                # Re-associate this workstation's latest known identity
-                # result with whichever track_id currently occupies it --
-                # runs on EVERY occupied frame, not only when _identify()
-                # itself just ran above. This matters because a brand-new
-                # track's ID is often still unconfirmed (None) on the
-                # exact frame _identify() fires: verified directly that
-                # Ultralytics' ByteTrack only confirms an ID from a
-                # track's SECOND seen frame onward, not its first. Without
-                # this being separate from the identify() branch above,
-                # the very first identification for a newly-arrived
-                # person would silently never reach the display -- lost
-                # to a one-frame timing gap, not a logic error as such.
-                if occupying_person.track_id is not None:
-                    event_type, detected, similarity = self._last_result.get(name, ("VACANT", None, None))
-                    self._last_identity_by_track[occupying_person.track_id] = (
-                        event_type, detected, self._last_employee_name.get(name), similarity)
 
-            # Item 7 (room-vs-desk time split): anyone tracked but NOT
-            # occupying a workstation this frame is still "in the room"
-            # (per your confirmation: this camera's whole frame IS the
-            # room) -- record that too, for anyone with a known identity.
-            self._record_room_presence_for_roaming_people(db, people, occupied_track_ids, now)
+            # Event-driven identification trigger (Section 3.2): fire
+            # on a VACANT -> ACTIVE transition, or on a heartbeat
+            # thereafter -- never on every frame. The heartbeat
+            # interval is dynamic: the normal baseline, or a faster
+            # retry if the last result here was UNKNOWN -- see
+            # _identify_retry_interval_seconds(). Deliberately a
+            # SEPARATE check from the VACANT path's heartbeat_due
+            # above: that one governs how often to re-publish/re-write
+            # a VACANT event (unrelated to identification confidence)
+            # and must stay on the fixed baseline, not the dynamic one.
+            identify_retry_due = (now - self._last_identify_time.get(name, -1e9)) \
+                >= self._identify_retry_interval_seconds(name)
+            if status_changed or identify_retry_due:
+                self._last_identify_time[name] = now
+                event_type, detected, similarity, snr, employee_name = self._identify(db, frame, occupying_person, assigned)
+                self._write_event(db, name, event_type, assigned, detected, similarity, snr)
+                self._last_employee_name[name] = employee_name
 
-            # Activity classification: decoupled from occupancy/identity
-            # (see _classify_and_publish_activity's docstring) -- runs
-            # against every tracked person in frame, not just workstation
-            # occupants.
-            self._classify_and_publish_activity(people, now)
+                # Attendance recording -- real tables for a genuinely
+                # live stream, simulated tables (item 8) otherwise --
+                # and only on an actual confirmed MATCH, never on
+                # MISMATCH or UNKNOWN: attendance is about tracking a
+                # real (or, for a demo run, a real-looking simulated)
+                # employee presence, not logging every inconclusive
+                # glance at a desk.
+                if event_type == "MATCH" and detected:
+                    record_fn = attendance.record_detection_core if self.is_live else attendance.record_simulated_detection_core
+                    try:
+                        record_fn(
+                            db, self.org_id, detected, cam_id=self.cam_id,
+                            location=name, timestamp=datetime.utcnow(),
+                        )
+                    except Exception as e:
+                        # Attendance recording must never take down
+                        # the detection loop itself -- a DB hiccup
+                        # here shouldn't stop occupancy/identification
+                        # from continuing to work and being logged.
+                        print(f"[stream_worker] attendance recording failed for {detected} at {name}: {e}")
+            # else: still occupied, within the current interval -- no
+            # identification call this frame, matching the documented
+            # "tens of calls per day, not per frame" design goal.
 
-            # Live preview push: once per processed frame (covering every
-            # workstation's current box/status together in one image),
-            # throttled internally by _maybe_publish_frame regardless of
-            # how many workstations are configured or how fast frames are
-            # arriving.
-            h, w = frame.shape[:2]
-            self._maybe_publish_frame(frame, w, h, rois, people)
-        finally:
-            os.unlink(tmp_path)
+            # Re-associate this workstation's latest known identity
+            # result with whichever track_id currently occupies it --
+            # runs on EVERY occupied frame, not only when _identify()
+            # itself just ran above. This matters because a brand-new
+            # track's ID is often still unconfirmed (None) on the
+            # exact frame _identify() fires: verified directly that
+            # Ultralytics' ByteTrack only confirms an ID from a
+            # track's SECOND seen frame onward, not its first. Without
+            # this being separate from the identify() branch above,
+            # the very first identification for a newly-arrived
+            # person would silently never reach the display -- lost
+            # to a one-frame timing gap, not a logic error as such.
+            if occupying_person.track_id is not None:
+                event_type, detected, similarity = self._last_result.get(name, ("VACANT", None, None))
+                self._last_identity_by_track[occupying_person.track_id] = (
+                    event_type, detected, self._last_employee_name.get(name), similarity)
+
+        # Item 7 (room-vs-desk time split): anyone tracked but NOT
+        # occupying a workstation this frame is still "in the room"
+        # (per your confirmation: this camera's whole frame IS the
+        # room) -- record that too, for anyone with a known identity.
+        self._record_room_presence_for_roaming_people(db, people, occupied_track_ids, now)
+
+        # Activity classification: decoupled from occupancy/identity
+        # (see _classify_and_publish_activity's docstring) -- runs
+        # against every tracked person in frame, not just workstation
+        # occupants.
+        self._classify_and_publish_activity(people, now)
+
+        # Live preview push: once per processed frame (covering every
+        # workstation's current box/status together in one image),
+        # throttled internally by _maybe_publish_frame regardless of
+        # how many workstations are configured or how fast frames are
+        # arriving.
+        h, w = frame.shape[:2]
+        self._maybe_publish_frame(frame, w, h, rois, people)

@@ -33,7 +33,6 @@ Honest scope notes:
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 
 import cv2
@@ -111,22 +110,21 @@ def sample_diagnostics(source_path: str, db, org_id: int, cam_id: int, num_sampl
 
         def _sample_one(frame) -> None:
             nonlocal frames_with_person, frames_sampled
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                cv2.imwrite(tmp.name, frame)
-                tmp_path = tmp.name
-            try:
-                t0 = time.monotonic()
-                people = yolo_detector.detect_people(tmp_path)
-                per_call_seconds.append(time.monotonic() - t0)
-                frames_sampled += 1
-                if people:
-                    frames_with_person += 1
-                    confidences.extend(p.confidence for p in people)
-                for name, roi in rois.items():
-                    if any(yolo_detector.boxes_overlap(p, roi) for p in people):
-                        frames_with_occupancy[name] += 1
-            finally:
-                os.unlink(tmp_path)
+            # Previously wrote the frame to a temp JPEG and read it back
+            # purely so YOLO could see it -- Ultralytics accepts the
+            # ndarray directly (see yolo_detector.detect_people's
+            # docstring), so that round trip was pure overhead on a path
+            # whose entire purpose is timing per-call inference speed.
+            t0 = time.monotonic()
+            people = yolo_detector.detect_people(frame)
+            per_call_seconds.append(time.monotonic() - t0)
+            frames_sampled += 1
+            if people:
+                frames_with_person += 1
+                confidences.extend(p.confidence for p in people)
+            for name, roi in rois.items():
+                if any(yolo_detector.boxes_overlap(p, roi) for p in people):
+                    frames_with_occupancy[name] += 1
 
         if sample_indices is not None:
             for idx in sample_indices:
@@ -224,7 +222,21 @@ def _assigned_employee(db, org_id: int, cam_id: int, name: str) -> str | None:
     return row.employee_id if row else None
 
 
-def _identify(db, org_id: int, frame, occupying_person, assigned_employee_id: str | None):
+def _load_gallery(db, org_id: int) -> tuple[dict, dict]:
+    """Loads and groups the org's face gallery once; see annotate_video(),
+    which calls this a single time per export and passes the result into
+    every _identify() call for that video, instead of re-querying the
+    database every time detect_every_n_frames comes due. A single export
+    run processes one short clip for one org -- the gallery can't change
+    mid-run, so there was nothing to gain from re-fetching it repeatedly."""
+    gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == org_id).all()
+    gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
+    grouped = logic.group_gallery_by_person(gallery)
+    names = {row.employee_id: row.employee.name for row in gallery_rows}
+    return grouped, names
+
+
+def _identify(frame, occupying_person, assigned_employee_id: str | None, grouped: dict, gallery_names: dict):
     """Same logic as StreamWorker._identify -- kept as a separate copy
     here (rather than importing StreamWorker's method) since that method
     is bound to a live worker's per-stream state; this module runs in a
@@ -236,30 +248,31 @@ def _identify(db, org_id: int, frame, occupying_person, assigned_employee_id: st
     fixed here: a THIRD, separate copy of the same identify logic, found
     while wiring per-track identity labels into this module's output.
     Also now returns the matched employee's display name (available for
-    free from gallery_rows' Employee relationship, already loaded for
-    the gallery lookup below), so the annotated video can label a box
-    with a real name instead of just a bare employee_id."""
+    free from gallery_names, loaded once by _load_gallery() rather than
+    re-queried here), so the annotated video can label a box with a real
+    name instead of just a bare employee_id.
+
+    `grouped`/`gallery_names` are loaded once per annotate_video() call
+    (see _load_gallery()) rather than re-queried on every call here."""
     crop_path = face_crop.crop_person_region(frame, occupying_person)
     try:
-        live_embedding, _w = face_embedder.extract_embedding(crop_path)
+        live_embedding, width_px = face_embedder.extract_embedding(crop_path)
     except ValueError:
         return "UNKNOWN", None, None, None
     finally:
         os.unlink(crop_path)
 
-    gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == org_id).all()
-    gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
-    grouped = logic.group_gallery_by_person(gallery)
     best = logic.match_single_pass(live_embedding, grouped)
     if best is None:
         return "UNKNOWN", None, None, None
 
     detected_employee_id, _view, similarity = best
-    employee_name = next((row.employee.name for row in gallery_rows if row.employee_id == detected_employee_id), None)
+    employee_name = gallery_names.get(detected_employee_id)
     snr = similarity * 10
     status = logic.decide_match_status(
         occupancy_present=True, best_similarity=similarity, best_snr=snr,
         is_assigned_employee=(detected_employee_id == assigned_employee_id),
+        face_width_px=width_px,
     )
     if status == logic.MatchStatus.UNKNOWN:
         detected_employee_id = None
@@ -304,6 +317,7 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
     # concurrent annotate_video() calls for different videos must not
     # share tracker state.
     pose_model = yolo_detector.new_model_instance()
+    grouped_gallery, gallery_names = _load_gallery(db, org_id)
 
     try:
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -318,48 +332,42 @@ def annotate_video(source_path: str, dest_path: str, db, org_id: int, cam_id: in
                 break
 
             if frame_idx % detect_every_n_frames == 0:
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                    cv2.imwrite(tmp.name, frame)
-                    tmp_path = tmp.name
-                try:
-                    last_people = yolo_detector.detect_and_track_people(pose_model, tmp_path)
-                    now = time.monotonic()
-                    for name, roi in rois.items():
-                        occupying_person = face_crop.best_overlapping_person(last_people, roi)
-                        occupied = occupying_person is not None
-                        raw_status = "ACTIVE" if occupied else "VACANT"
-                        previous_status = last_status.get(name)
-                        new_status = logic.apply_occupancy_hysteresis(
-                            last_status, pending_status, pending_status_count,
-                            name, raw_status, logic.OCCUPANCY_HYSTERESIS_FRAMES,
-                        )
-                        if new_status == "VACANT":
-                            last_result[name] = ("VACANT", None, None)
-                            continue
-                        if occupying_person is None:
-                            continue  # committed ACTIVE (hysteresis), but no one detected THIS frame -- nothing to identify
-                        assigned = _assigned_employee(db, org_id, cam_id, name)
-                        became_active = previous_status != "ACTIVE"
-                        heartbeat_due = (now - last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
-                        if became_active or heartbeat_due:
-                            last_identify_time[name] = now
-                            event_type, detected, similarity, employee_name = _identify(
-                                db, org_id, frame, occupying_person, assigned)
-                            last_result[name] = (event_type, detected, similarity)
-                            last_employee_name[name] = employee_name
-                        # Re-associate this workstation's latest known
-                        # identity with whichever track_id currently
-                        # occupies it, every occupied frame -- not only
-                        # when _identify() just ran above -- since a
-                        # brand-new track's ID is often still unconfirmed
-                        # on the exact frame identify() fires (see
-                        # stream_worker.py's identical fix for why).
-                        if occupying_person.track_id is not None:
-                            event_type, detected, similarity = last_result.get(name, ("VACANT", None, None))
-                            last_identity_by_track[occupying_person.track_id] = (
-                                event_type, detected, last_employee_name.get(name), similarity)
-                finally:
-                    os.unlink(tmp_path)
+                last_people = yolo_detector.detect_and_track_people(pose_model, frame)
+                now = time.monotonic()
+                for name, roi in rois.items():
+                    occupying_person = face_crop.best_overlapping_person(last_people, roi)
+                    occupied = occupying_person is not None
+                    raw_status = "ACTIVE" if occupied else "VACANT"
+                    previous_status = last_status.get(name)
+                    new_status = logic.apply_occupancy_hysteresis(
+                        last_status, pending_status, pending_status_count,
+                        name, raw_status, logic.OCCUPANCY_HYSTERESIS_FRAMES,
+                    )
+                    if new_status == "VACANT":
+                        last_result[name] = ("VACANT", None, None)
+                        continue
+                    if occupying_person is None:
+                        continue  # committed ACTIVE (hysteresis), but no one detected THIS frame -- nothing to identify
+                    assigned = _assigned_employee(db, org_id, cam_id, name)
+                    became_active = previous_status != "ACTIVE"
+                    heartbeat_due = (now - last_identify_time.get(name, -1e9)) >= HEARTBEAT_SECONDS
+                    if became_active or heartbeat_due:
+                        last_identify_time[name] = now
+                        event_type, detected, similarity, employee_name = _identify(
+                            frame, occupying_person, assigned, grouped_gallery, gallery_names)
+                        last_result[name] = (event_type, detected, similarity)
+                        last_employee_name[name] = employee_name
+                    # Re-associate this workstation's latest known
+                    # identity with whichever track_id currently
+                    # occupies it, every occupied frame -- not only
+                    # when _identify() just ran above -- since a
+                    # brand-new track's ID is often still unconfirmed
+                    # on the exact frame identify() fires (see
+                    # stream_worker.py's identical fix for why).
+                    if occupying_person.track_id is not None:
+                        event_type, detected, similarity = last_result.get(name, ("VACANT", None, None))
+                        last_identity_by_track[occupying_person.track_id] = (
+                            event_type, detected, last_employee_name.get(name), similarity)
 
             # Draw on every frame using the latest cached detection --
             # keeps output video smooth even when detect_every_n_frames > 1.

@@ -123,8 +123,8 @@ def _extract_people(r, confidence_threshold: float, with_track_id: bool) -> list
     return detections
 
 
-def detect_people(image_path: str, confidence_threshold: float = 0.4) -> list[PersonDetection]:
-    """Runs real YOLO-pose inference on a single image file (the shared,
+def detect_people(frame, confidence_threshold: float = 0.4) -> list[PersonDetection]:
+    """Runs real YOLO-pose inference on a single image (the shared,
     stateless model -- no tracking) and returns normalized bounding boxes
     (+ keypoints, no track_id) for every detected person above the
     confidence threshold. Coordinates are normalized to match the
@@ -132,20 +132,37 @@ def detect_people(image_path: str, confidence_threshold: float = 0.4) -> list[Pe
     documentation (x1,y1,x2,y2 in 0.0-1.0), so a detection can be directly
     compared against a saved workstation rectangle. Used where there is no
     continuing frame sequence to track across (a single uploaded still).
+
+    `frame` accepts either a file path (str) or an in-memory image
+    (a numpy ndarray, e.g. straight from cv2.VideoCapture.read()) --
+    Ultralytics' predict() dispatches on the type internally, so no
+    branching is needed here. Callers should prefer passing the ndarray
+    directly rather than writing it to a temp JPEG first and passing the
+    path: round-tripping every frame through disk just to read it back
+    immediately was pure overhead with no accuracy benefit, and measurably
+    slower, especially on machines where antivirus/real-time-scan file
+    locks make repeated small file writes meaningfully slower than on a
+    typical Linux build box.
     """
     model = get_model()
-    results = model.predict(image_path, verbose=False)
+    results = model.predict(frame, verbose=False)
     return _extract_people(results[0], confidence_threshold, with_track_id=False)
 
 
-def detect_and_track_people(model, image_path: str, confidence_threshold: float = 0.4) -> list[PersonDetection]:
+def detect_and_track_people(model, frame, confidence_threshold: float = 0.4) -> list[PersonDetection]:
     """Like detect_people(), but for a continuing sequence of frames from
     ONE video source: `model` must be an instance this caller keeps and
     reuses across every frame of that same source (see
     new_model_instance()), so Ultralytics' tracker can assign and persist
     track IDs across calls. Never pass the shared get_model() singleton
-    here -- see new_model_instance()'s docstring for why."""
-    results = model.track(image_path, persist=True, verbose=False, tracker="bytetrack.yaml")
+    here -- see new_model_instance()'s docstring for why.
+
+    `frame` accepts either a file path (str) or an in-memory ndarray --
+    see detect_people()'s docstring for why passing the ndarray directly,
+    instead of writing a temp JPEG per frame first, is the fix we want
+    here for every real-time caller (stream_worker.py, video_export.py).
+    """
+    results = model.track(frame, persist=True, verbose=False, tracker="bytetrack.yaml")
     return _extract_people(results[0], confidence_threshold, with_track_id=True)
 
 
