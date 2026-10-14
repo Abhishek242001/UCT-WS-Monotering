@@ -8,6 +8,8 @@ and no real YOLO/InsightFace model.
 import sys
 from pathlib import Path
 
+import pytest
+
 BACKEND_DIR = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
 
@@ -78,6 +80,11 @@ def test_gallery_queries_database_on_first_call():
     assert db.query_count == 1
     assert names == {"EMP-1": "Alice"}
     assert "EMP-1" in grouped
+    # The very first call can only ever be a miss -- nothing cached yet.
+    stats = worker.get_gallery_cache_stats()
+    assert stats["hits"] == 0
+    assert stats["misses"] == 1
+    assert stats["hit_ratio"] == 0.0
 
 
 def test_gallery_is_served_from_cache_within_ttl():
@@ -93,6 +100,11 @@ def test_gallery_is_served_from_cache_within_ttl():
     assert names2 is names1
     assert grouped3 is grouped1
 
+    stats = worker.get_gallery_cache_stats()
+    assert stats["misses"] == 1  # the first call only
+    assert stats["hits"] == 2    # calls 2 and 3, served from cache
+    assert stats["hit_ratio"] == pytest.approx(2 / 3)
+
 
 def test_gallery_reloads_once_ttl_has_elapsed():
     worker = _worker()
@@ -107,6 +119,10 @@ def test_gallery_reloads_once_ttl_has_elapsed():
 
     worker._get_gallery(db)
     assert db.query_count == 2
+
+    stats = worker.get_gallery_cache_stats()
+    assert stats["misses"] == 2  # the initial call + the post-TTL reload
+    assert stats["hits"] == 0
 
 
 def test_reloaded_gallery_reflects_updated_rows():
@@ -142,3 +158,18 @@ def test_each_worker_instance_has_its_own_independent_cache():
     assert names_b == {"EMP-2": "Bob"}
     assert db_a.query_count == 1
     assert db_b.query_count == 1
+
+    # Hit/miss counters are per-worker too, not shared global state.
+    assert worker_a.get_gallery_cache_stats()["misses"] == 1
+    assert worker_b.get_gallery_cache_stats()["misses"] == 1
+
+
+def test_cache_stats_hit_ratio_is_none_before_any_call():
+    """Avoids a ZeroDivisionError/misleading 0.0 before _get_gallery has
+    ever run -- there's no ratio yet, not a 0% hit ratio."""
+    worker = _worker()
+    stats = worker.get_gallery_cache_stats()
+    assert stats["hits"] == 0
+    assert stats["misses"] == 0
+    assert stats["hit_ratio"] is None
+    assert stats["cache_age_seconds"] is None

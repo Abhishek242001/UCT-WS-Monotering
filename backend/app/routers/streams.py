@@ -126,7 +126,8 @@ def list_streams(org_id: int, _admin=Depends(require_admin)):
     return {"streams": [
         {"stream_id": sid, "source": _mask_credentials(w.source), "org_id": w.org_id, "cam_id": w.cam_id,
          "is_alive": w.is_alive(),
-         "frames_processed": w.frames_processed, "source_opened": w.source_opened}
+         "frames_processed": w.frames_processed, "source_opened": w.source_opened,
+         "gallery_cache": w.get_gallery_cache_stats()}
         for sid, w in _workers.items() if w.org_id == org_id
     ]}
 

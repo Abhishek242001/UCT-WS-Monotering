@@ -142,12 +142,16 @@ class StreamWorker(threading.Thread):
         self._last_identify_time: dict[str, float] = {}  # workstation_name -> monotonic time
         self._last_result: dict[str, tuple] = {}          # workstation_name -> (event_type, detected_employee_id, similarity), for live-frame labels between identify() calls
         self._last_frame_publish_time: float = -1e9
+        self._fps_last_tick: float | None = None  # monotonic time of the previous processed frame, for the live FPS overlay
+        self._fps_ema: float | None = None        # smoothed (exponential moving average) frames/sec shown top-left on the live preview
         self._last_position: dict[int, tuple[float, float, float]] = {}  # track_id -> (x_norm, y_norm, monotonic_time), for is_moving
         self._last_activity: dict[int, str] = {}          # track_id -> Activity.value, so activity is only published on a genuine change
         self._last_identity_by_track: dict[int, tuple] = {}  # track_id -> (event_type, detected_employee_id, employee_name, similarity), so a person's own box label follows them, not their workstation's rectangle
         self._last_employee_name: dict[str, str | None] = {}  # workstation_name -> employee_name from the most recent MATCH/MISMATCH, paired with _last_result
         self._last_room_record_time: dict[int, float] = {}  # track_id -> monotonic time, heartbeat for "in room, not at desk" attendance segments
         self._gallery_cache: dict | None = None  # {"grouped": ..., "names": {employee_id: name}, "loaded_at": monotonic time} -- see _get_gallery()
+        self._gallery_cache_hits = 0    # served from the in-memory copy, no DB query
+        self._gallery_cache_misses = 0  # had to (re)query the DB -- first call ever, or TTL expired
         self._pending_occupancy: dict[str, str] = {}       # workstation_name -> raw status currently being tracked toward a hysteresis commit
         self._pending_occupancy_count: dict[str, int] = {}  # workstation_name -> consecutive frames the pending status has held
 
@@ -207,6 +211,7 @@ class StreamWorker(threading.Thread):
                     time.sleep(0.2)
                     continue
                 consecutive_failures = 0
+                self._tick_fps()
                 self._process_frame(db, frame, rois, pose_model)
                 self.frames_processed += 1
                 self._publish({"type": "progress", "frames_processed": self.frames_processed,
@@ -266,6 +271,28 @@ class StreamWorker(threading.Thread):
             "similarity": similarity, "snr": snr, "frame_number": self.frames_processed,
         })
 
+    def _tick_fps(self) -> None:
+        """Updates the smoothed processing-rate estimate shown by the live
+        preview's FPS overlay. Measures real wall-clock time between
+        successive *processed* frames (i.e. actual throughput, including
+        YOLO/identify work), not the throttled publish rate from
+        LIVE_FRAME_MIN_INTERVAL_SECONDS -- those are deliberately
+        different things (publish rate is capped on purpose; this is not).
+        An exponential moving average smooths out one-off slow frames
+        (e.g. the heartbeat identify() tick) so the number on screen
+        doesn't jitter wildly frame to frame."""
+        now = time.monotonic()
+        if self._fps_last_tick is not None:
+            dt = now - self._fps_last_tick
+            if dt > 0:
+                instantaneous_fps = 1.0 / dt
+                alpha = 0.2  # smoothing factor: lower = smoother/slower to react, higher = more responsive
+                self._fps_ema = (
+                    instantaneous_fps if self._fps_ema is None
+                    else (alpha * instantaneous_fps + (1 - alpha) * self._fps_ema)
+                )
+        self._fps_last_tick = now
+
     def _maybe_publish_frame(self, frame, w: int, h: int, rois: dict[str, dict], people: list):
         """Throttled live preview: draws the current occupancy/identity
         state onto a COPY of the frame (never mutates the frame the
@@ -287,7 +314,8 @@ class StreamWorker(threading.Thread):
 
         annotated = frame.copy()
         frame_annotate.draw_annotations(
-            annotated, w, h, rois, self._last_occupancy, self._last_result, people, self._last_identity_by_track
+            annotated, w, h, rois, self._last_occupancy, self._last_result, people, self._last_identity_by_track,
+            fps=self._fps_ema
         )
         ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, LIVE_FRAME_JPEG_QUALITY])
         if not ok:
@@ -360,8 +388,10 @@ class StreamWorker(threading.Thread):
         """
         now = time.monotonic()
         if self._gallery_cache is not None and (now - self._gallery_cache["loaded_at"]) < GALLERY_CACHE_TTL_SECONDS:
+            self._gallery_cache_hits += 1
             return self._gallery_cache["grouped"], self._gallery_cache["names"]
 
+        self._gallery_cache_misses += 1
         gallery_rows = db.query(EmployeeFaceGallery).join(Employee).filter(Employee.org_id == self.org_id).all()
         gallery = {f"{row.employee_id}__{row.view}": row.get_embedding() for row in gallery_rows if row.embedding}
         grouped = logic.group_gallery_by_person(gallery)
@@ -369,6 +399,24 @@ class StreamWorker(threading.Thread):
 
         self._gallery_cache = {"grouped": grouped, "names": names, "loaded_at": now}
         return grouped, names
+
+    def get_gallery_cache_stats(self) -> dict:
+        """Hit/miss counters for this worker's in-memory gallery cache
+        (see _get_gallery()/GALLERY_CACHE_TTL_SECONDS above). A "hit" is
+        an identify() call served from the already-loaded copy with no
+        DB query; a "miss" is the first call ever for this worker, or any
+        call after the TTL expired, that had to (re)query the database.
+        Exposed via GET /streams/list so this can be checked against a
+        running camera without reading logs."""
+        total = self._gallery_cache_hits + self._gallery_cache_misses
+        return {
+            "hits": self._gallery_cache_hits,
+            "misses": self._gallery_cache_misses,
+            "hit_ratio": (self._gallery_cache_hits / total) if total else None,
+            "cache_age_seconds": (
+                (time.monotonic() - self._gallery_cache["loaded_at"]) if self._gallery_cache is not None else None
+            ),
+        }
 
     def _update_position_and_check_moving(self, person, now: float) -> bool:
         """Tracks this person's approximate body position across frames

@@ -52,7 +52,8 @@ def _person_label_and_color(p, last_identity_by_track: dict[int, tuple] | None) 
 
 def draw_annotations(frame, w: int, h: int, rois: dict[str, dict],
                       last_status: dict[str, str], last_result: dict[str, tuple],
-                      last_people: list, last_identity_by_track: dict[int, tuple] | None = None) -> None:
+                      last_people: list, last_identity_by_track: dict[int, tuple] | None = None,
+                      fps: float | None = None) -> None:
     """Mutates `frame` in place. `w`/`h` are the frame's pixel dimensions
     (passed explicitly rather than re-read from `frame.shape`, since both
     callers already have them on hand from the capture source).
@@ -73,6 +74,9 @@ def draw_annotations(frame, w: int, h: int, rois: dict[str, dict],
       identity being anchored to a fixed desk rectangle. Optional
       (defaults to None/no track-based labels) for backward
       compatibility with any caller that hasn't adopted tracking.
+    - `fps`: current processing rate to show as a small overlay in the
+      frame's top-left corner. Optional (defaults to None/no overlay) so
+      a caller that hasn't computed one yet draws exactly as before.
 
     Callers are expected to keep drawing with the latest CACHED values on
     every frame even when detection/identification only ran on some of
@@ -80,6 +84,10 @@ def draw_annotations(frame, w: int, h: int, rois: dict[str, dict],
     overlay looking continuous rather than flickering blank between
     detection cycles.
     """
+    if fps is not None:
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+
     for p in last_people:
         x1, y1 = int(p.x1 * w), int(p.y1 * h)
         x2, y2 = int(p.x2 * w), int(p.y2 * h)
@@ -88,7 +96,7 @@ def draw_annotations(frame, w: int, h: int, rois: dict[str, dict],
         cv2.putText(frame, label, (x1, max(12, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
-    banner_y = 24
+    banner_y = 48 if fps is not None else 24
     for name, roi in rois.items():
         rx1, ry1 = int(roi["x1"] * w), int(roi["y1"] * h)
         rx2, ry2 = int(roi["x2"] * w), int(roi["y2"] * h)
